@@ -557,7 +557,11 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
         if(playedPairs.has(matchKey(home,id))) return false;
         if(excludedMatchups.has(matchKey(home,id))) return false;
         if(groupBlocked(id)) return false;
-        if((teamCount[id]||0) < teamCap(id)) return false;
+        // Only overflow if this team has an explicit cap ABOVE the base target
+        const cap = teamCap(id);
+        if(cap <= TARGET) return false;
+        if((teamCount[id]||0) < TARGET) return false;
+        if((teamCount[id]||0) >= cap) return false;
         return true;
       }).sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
 

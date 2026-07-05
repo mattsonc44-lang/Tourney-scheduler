@@ -438,53 +438,76 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   // ── Main scheduler ──────────────────────────────────────────────────────────
-  // Build a flat list of ALL teams
   const allTeamIds = groups.flatMap(g=>g.teams);
 
-  // Keep scheduling until no progress
+  // Count how many open slots a team can still play in (for priority)
+  const countAvailableSlots = (id) => {
+    let count = 0;
+    for(const sk of allSlotKeys){
+      const playing = slotTeams[sk]||new Set();
+      if(playing.has(id)) continue;
+      const prev = prevSlot[sk];
+      if(prev!==undefined && (slotTeams[prev]||new Set()).has(id)) continue;
+      // At least one open court at this slot
+      if(courts.some(c => courtSlots[c.id].has(sk) && !usedCourtSlot[`${c.id}-${sk}`])) count++;
+    }
+    return count;
+  };
+
   let progress = true;
   while(progress){
     progress = false;
 
-    // Find all teams still needing games, sorted by most-needy first
     const needy = allTeamIds
-      .filter(id => teamCount[id]===undefined || teamCount[id] < teamCap(id))
-      .sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
+      .filter(id => (teamCount[id]||0) < teamCap(id))
+      .sort((a,b) => {
+        // Primary: fewest games first
+        const diff = (teamCount[a]||0) - (teamCount[b]||0);
+        if(diff !== 0) return diff;
+        // Tiebreak: fewest available slots remaining (most constrained first)
+        return countAvailableSlots(a) - countAvailableSlots(b);
+      });
 
     for(const home of needy){
       if((teamCount[home]||0) >= teamCap(home)) continue;
-
-      // Find the best opponent: also needs games, hasn't played home yet,
-      // prefer same group, then least-games first
       const homeGroup = groups.find(g=>g.teams.includes(home));
 
-      const opponents = allTeamIds
-        .filter(id => {
-          if(id===home) return false;
-          if(playedPairs.has(matchKey(home,id))) return false;
-          if(excludedMatchups.has(matchKey(home,id))) return false;
-          if((teamCount[id]||0) >= teamCap(id)) return false;
-          return true;
-        })
-        .sort((a,b) => {
-          // Same group first
-          const aGroup = groups.find(g=>g.teams.includes(a));
-          const bGroup = groups.find(g=>g.teams.includes(b));
-          const aSame = aGroup?.id===homeGroup?.id ? 0 : 1;
-          const bSame = bGroup?.id===homeGroup?.id ? 0 : 1;
-          if(aSame!==bSame) return aSame-bSame;
-          // Then least games first
-          return (teamCount[a]||0)-(teamCount[b]||0);
-        });
+      // Try opponents: first those who also need games (prefer same group),
+      // then if no slot found, try opponents already at target (let them go to 5)
+      const needsGame = allTeamIds.filter(id => {
+        if(id===home) return false;
+        if(playedPairs.has(matchKey(home,id))) return false;
+        if(excludedMatchups.has(matchKey(home,id))) return false;
+        if((teamCount[id]||0) >= teamCap(id)) return false;
+        return true;
+      }).sort((a,b) => {
+        const ag=groups.find(g=>g.teams.includes(a));
+        const bg=groups.find(g=>g.teams.includes(b));
+        const aSame=ag?.id===homeGroup?.id?0:1;
+        const bSame=bg?.id===homeGroup?.id?0:1;
+        if(aSame!==bSame) return aSame-bSame;
+        return (teamCount[a]||0)-(teamCount[b]||0);
+      });
 
-      for(const away of opponents){
+      // Also build overflow opponents (already at target, as last resort)
+      const overflowOpps = allTeamIds.filter(id => {
+        if(id===home) return false;
+        if(playedPairs.has(matchKey(home,id))) return false;
+        if(excludedMatchups.has(matchKey(home,id))) return false;
+        if((teamCount[id]||0) < teamCap(id)) return false; // only at-or-over target
+        return true;
+      }).sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
+
+      const allOpps = [...needsGame, ...overflowOpps];
+
+      for(const away of allOpps){
         const gid = homeGroup?.id || groups[0]?.id;
         const found = findSlot(home, away, gid);
         if(found){
           place(found.sk, found.court.id, home, away, gid, false,
             (courtGroupPrimary[found.court.id]||[]).includes(gid));
           progress = true;
-          break; // move to next needy team
+          break;
         }
       }
     }

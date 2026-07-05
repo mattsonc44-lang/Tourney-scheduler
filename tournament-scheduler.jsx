@@ -586,6 +586,33 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     }
   }
 
+  // ── Rescue pass: teams stuck under target get ANY available opponent ──────────
+  // This catches cases where teams ended up synchronized (playing at same times)
+  // and can't find within-group opponents — pair them with anyone across any group
+  // who still has open slots, letting those opponents go slightly over TARGET if needed.
+  {
+    const stuck = allTeamIds.filter(id => (teamCount[id]||0) < TARGET);
+    if(stuck.length > 0){
+      // Sort: most constrained (fewest available slots) first
+      stuck.sort((a,b) => countAvailableSlots(a)-countAvailableSlots(b));
+      for(const home of stuck){
+        if((teamCount[home]||0) >= TARGET) continue;
+        // Try any opponent regardless of their count — prefer lowest count first
+        const candidates = allTeamIds
+          .filter(id => id!==home && !playedPairs.has(matchKey(home,id)) && !excludedMatchups.has(matchKey(home,id)))
+          .sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
+        for(const away of candidates){
+          const gid = groups.find(g=>g.teams.includes(home))?.id || groups[0]?.id;
+          const found = findSlot(home, away, gid);
+          if(found){
+            place(found.sk, found.court.id, home, away, gid, false, false);
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // ── Report ──────────────────────────────────────────────────────────────────
   const under = allTeamIds.filter(id=>(teamCount[id]||0)<TARGET);
   const over  = allTeamIds.filter(id=>(teamCount[id]||0)>TARGET);

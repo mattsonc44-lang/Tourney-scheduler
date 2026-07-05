@@ -865,6 +865,10 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const [selectedGame,setSelectedGame]=useState(null);
   const [dragOver,setDragOver]=useState(null);
   const [dragError,setDragError]=useState(null);
+  const [createMode,setCreateMode]=useState(false); // manual game creation
+  const [createTeamA,setCreateTeamA]=useState("");
+  const [createTeamB,setCreateTeamB]=useState("");
+  const [dragSuggestion,setDragSuggestion]=useState(null);
 
   const currentState=useCallback(()=>({
     groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,
@@ -1620,30 +1624,101 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
               <>
                 {dragError&&(
                   <div style={{background:P.red+"22",border:`1px solid ${P.red}55`,borderRadius:8,
-                    padding:"10px 16px",color:P.red,marginBottom:12,fontSize:13,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    padding:"10px 16px",color:P.red,marginBottom:dragSuggestion?4:12,fontSize:13,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                     <span>{dragError}</span>
-                    <span onClick={()=>setDragError(null)} style={{cursor:"pointer",marginLeft:12,fontWeight:700}}>✕</span>
+                    <span onClick={()=>{setDragError(null);setDragSuggestion(null);}} style={{cursor:"pointer",marginLeft:12,fontWeight:700}}>✕</span>
                   </div>
                 )}
-                <div style={{
-                  background:selectedGame!==null?P.accent+"18":P.surfaceLight,
-                  border:`1px solid ${selectedGame!==null?P.accent+"66":P.border}`,
-                  borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,
-                  display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
-                }}>
-                  {selectedGame!==null?(()=>{
-                    const g=schedule[selectedGame];
-                    const h=teams[g.match.home],a=teams[g.match.away];
-                    return <>
-                      <span style={{color:P.accent,fontWeight:700}}>✓ Selected:</span>
-                      <span style={{color:h?.color,fontWeight:700}}>{h?.name}</span>
-                      <span style={{color:P.muted}}>vs</span>
-                      <span style={{color:a?.color,fontWeight:700}}>{a?.name}</span>
-                      <span style={{color:P.muted,fontSize:12}}>— tap any slot to move or swap</span>
-                      <Btn small variant="ghost" style={{marginLeft:"auto"}} onClick={()=>setSelectedGame(null)}>Cancel</Btn>
-                    </>;
-                  })():<span style={{color:P.muted}}>🖱️ Drag a game to move it — or tap to select, then tap a slot to place. Back-to-back rules enforced.</span>}
-                </div>
+                {dragSuggestion&&(
+                  <div style={{background:P.green+"18",border:`1px solid ${P.green}44`,borderRadius:8,
+                    padding:"10px 16px",marginBottom:12,fontSize:13,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                    <span style={{color:P.green,fontWeight:700}}>💡 Suggestion:</span>
+                    <span style={{color:P.text}}>
+                      Place at <strong>{dragSuggestion.timeLabel}</strong> on <strong>{fmtDate(dragSuggestion.date)}</strong> — <strong>{dragSuggestion.courtName}</strong>
+                    </span>
+                    <button onClick={()=>{
+                      const s=dragSuggestion;
+                      const dIdx=scheduleDatesSorted.indexOf(s.date);
+                      const targetSk=dIdx*100000+s.slotTime;
+                      const homeGroup=s.isCreate?groups.find(g=>g.teams.includes(createTeamA)):groups.find(g=>g.teams.includes(s.src?.match?.home));
+                      const gid=homeGroup?.id||groups[0]?.id;
+                      if(s.isCreate){
+                        const newGame={slotKey:targetSk,date:s.date,dayIdx:dIdx,absTimeMins:s.slotTime,timeLabel:s.timeLabel,courtId:s.courtId,match:{groupId:gid,home:createTeamA,away:createTeamB},isPinned:false,isPrimary:false,isMustPlay:false};
+                        const newSchedule=s.gameToReplace?schedule.map(g=>g===s.gameToReplace?newGame:g):[...schedule,newGame];
+                        setSchedule(newSchedule);setCreateMode(false);setCreateTeamA("");setCreateTeamB("");
+                      } else {
+                        const newSchedule=[...schedule];
+                        newSchedule[s.srcIdx]={...s.src,slotKey:targetSk,date:s.date,dayIdx:dIdx,absTimeMins:s.slotTime,timeLabel:s.timeLabel,courtId:s.courtId};
+                        setSchedule(newSchedule);
+                      }
+                      setDragError(null);setDragSuggestion(null);
+                    }} style={{background:P.green,color:"#0d1b2a",border:"none",borderRadius:6,padding:"5px 14px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13}}>
+                      Place Here
+                    </button>
+                    <span onClick={()=>{setDragError(null);setDragSuggestion(null);}} style={{cursor:"pointer",color:P.muted,fontSize:12,marginLeft:"auto"}}>Dismiss</span>
+                  </div>
+                )}
+
+                {/* Create Game Panel */}
+                {createMode?(
+                  <div style={{background:P.purple+"18",border:`1px solid ${P.purple}55`,borderRadius:8,padding:"12px 16px",marginBottom:14}}>
+                    <div style={{fontWeight:700,color:P.purple,marginBottom:10,fontSize:14}}>✏️ Create Game — tap a slot to place it</div>
+                    <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+                      <div>
+                        <div style={{color:P.muted,fontSize:11,marginBottom:4}}>Team A</div>
+                        <select value={createTeamA} onChange={e=>setCreateTeamA(e.target.value)}
+                          style={{background:P.bg,border:`1px solid ${P.border}`,borderRadius:6,color:createTeamA?teams[createTeamA]?.color:P.muted,
+                            padding:"6px 10px",fontFamily:"inherit",fontSize:13,outline:"none"}}>
+                          <option value="">Select team…</option>
+                          {groups.map(g=>(
+                            <optgroup key={g.id} label={g.name}>
+                              {g.teams.map(tid=><option key={tid} value={tid}>{teams[tid]?.name}</option>)}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </div>
+                      <span style={{color:P.muted,fontWeight:700,fontSize:16}}>vs</span>
+                      <div>
+                        <div style={{color:P.muted,fontSize:11,marginBottom:4}}>Team B</div>
+                        <select value={createTeamB} onChange={e=>setCreateTeamB(e.target.value)}
+                          style={{background:P.bg,border:`1px solid ${P.border}`,borderRadius:6,color:createTeamB?teams[createTeamB]?.color:P.muted,
+                            padding:"6px 10px",fontFamily:"inherit",fontSize:13,outline:"none"}}>
+                          <option value="">Select team…</option>
+                          {groups.map(g=>(
+                            <optgroup key={g.id} label={g.name}>
+                              {g.teams.filter(tid=>tid!==createTeamA).map(tid=><option key={tid} value={tid}>{teams[tid]?.name}</option>)}
+                            </optgroup>
+                          ))}
+                        </select>
+                      </div>
+                      {createTeamA&&createTeamB&&<span style={{color:P.purple,fontSize:12}}>← Now tap any slot to place, or tap an existing game to replace it</span>}
+                      <Btn small variant="ghost" style={{marginLeft:"auto"}} onClick={()=>{setCreateMode(false);setCreateTeamA("");setCreateTeamB("");}}>Cancel</Btn>
+                    </div>
+                  </div>
+                ):(
+                  <div style={{display:"flex",gap:8,marginBottom:14,alignItems:"center",flexWrap:"wrap"}}>
+                    <div style={{
+                      flex:1,background:selectedGame!==null?P.accent+"18":P.surfaceLight,
+                      border:`1px solid ${selectedGame!==null?P.accent+"66":P.border}`,
+                      borderRadius:8,padding:"10px 14px",fontSize:13,
+                      display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
+                    }}>
+                      {selectedGame!==null?(()=>{
+                        const g=schedule[selectedGame];
+                        const h=teams[g.match.home],a=teams[g.match.away];
+                        return <>
+                          <span style={{color:P.accent,fontWeight:700}}>✓ Selected:</span>
+                          <span style={{color:h?.color,fontWeight:700}}>{h?.name}</span>
+                          <span style={{color:P.muted}}>vs</span>
+                          <span style={{color:a?.color,fontWeight:700}}>{a?.name}</span>
+                          <span style={{color:P.muted,fontSize:12}}>— tap another slot to move or swap</span>
+                          <Btn small variant="ghost" style={{marginLeft:"auto"}} onClick={()=>setSelectedGame(null)}>Cancel</Btn>
+                        </>;
+                      })():<span style={{color:P.muted}}>🖱️ Drag to move — or tap to select then tap to place.</span>}
+                    </div>
+                    <Btn small variant="purple" onClick={()=>{setCreateMode(true);setSelectedGame(null);setCreateTeamA("");setCreateTeamB("");}}>✏️ Create Game</Btn>
+                  </div>
+                )}
                 <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:16}}>
                   {allTeams.map(t=><Tag key={t.id} label={t.name} color={t.color}/>)}
                 </div>
@@ -1684,6 +1759,30 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                   const gameIdx=game?schedule.indexOf(game):-1;
                                   const isSelected=selectedGame!==null&&gameIdx===selectedGame;
                                   const isTarget=selectedGame!==null&&!closed&&gameIdx!==selectedGame;
+                                  // Find the nearest valid slot for a pair given a proposed schedule
+                                  const findValidSlot=(teamA,teamB,currentScheduleWithout)=>{
+                                    const allDates=[...new Set(courts.flatMap(c=>(c.windows||[]).map(w=>w.date).filter(Boolean)))].sort();
+                                    for(const d of allDates){
+                                      const times=[...new Set(courts.flatMap(c=>(c.windows||[]).filter(w=>w.date===d).flatMap(w=>{
+                                        const slots=[];let cur=timeMins(w.open);while(cur<=timeMins(w.close)){slots.push(cur);cur+=gameDuration;}return slots;
+                                      })))].sort((a,b)=>a-b);
+                                      for(const t of times){
+                                        for(const ct of courts){
+                                          const ctOpen=(ct.windows||[]).some(w=>w.date===d&&timeMins(w.open)<=t&&t<=timeMins(w.close));
+                                          if(!ctOpen)continue;
+                                          const occupied=currentScheduleWithout.some(s=>s.date===d&&s.absTimeMins===t&&s.courtId===ct.id);
+                                          if(occupied)continue;
+                                          const dIdx=allDates.indexOf(d);
+                                          const testGame={slotKey:dIdx*100000+t,date:d,dayIdx:dIdx,absTimeMins:t,timeLabel:fmtTime(t),courtId:ct.id,match:{home:teamA,away:teamB}};
+                                          const test=[...currentScheduleWithout,testGame];
+                                          if(!validateNoBackToBack(test,[teamA,teamB],gameDuration))
+                                            return{date:d,slotTime:t,courtId:ct.id,courtName:ct.name,timeLabel:fmtTime(t)};
+                                        }
+                                      }
+                                    }
+                                    return null;
+                                  };
+
                                   const doMoveOrSwap=(srcIdx,dstGame)=>{
                                     const src=schedule[srcIdx];
                                     const newSchedule=[...schedule];
@@ -1698,14 +1797,57 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                     }
                                     const affected=new Set([src.match.home,src.match.away,...(dstGame?[dstGame.match.home,dstGame.match.away]:[])]);
                                     const conflict=validateNoBackToBack(newSchedule,[...affected],gameDuration);
-                                    if(conflict){setDragError(`⚠️ Back-to-back conflict: ${conflict}`);}
-                                    else{setSchedule(newSchedule);setDragError(null);}
+                                    if(conflict){
+                                      // Find a valid alternative slot for the moved game
+                                      const withoutSrc=schedule.filter((_,i)=>i!==srcIdx);
+                                      const suggestion=findValidSlot(src.match.home,src.match.away,withoutSrc);
+                                      setDragError(`⚠️ Back-to-back conflict: ${conflict}`);
+                                      setDragSuggestion(suggestion?{...suggestion,srcIdx,src}:null);
+                                    } else {
+                                      setSchedule(newSchedule);setDragError(null);setDragSuggestion(null);
+                                    }
                                   };
 
                                   const handleTap=()=>{
-                                    if(closed)return;
+                                    if(closed) return;
+
+                                    // ── Create mode: place a new game into this slot ──
+                                    if(createMode){
+                                      if(!createTeamA||!createTeamB) return;
+                                      const dIdx=scheduleDatesSorted.indexOf(date);
+                                      const targetSk=dIdx*100000+slotTime;
+                                      const homeGroup=groups.find(g=>g.teams.includes(createTeamA));
+                                      const gid=homeGroup?.id||groups[0]?.id;
+                                      const newGame={
+                                        slotKey:targetSk,date,dayIdx:dIdx,
+                                        absTimeMins:slotTime,timeLabel:fmtTime(slotTime),
+                                        courtId:court.id,
+                                        match:{groupId:gid,home:createTeamA,away:createTeamB},
+                                        isPinned:false,isPrimary:false,isMustPlay:false,
+                                      };
+                                      const withNew=game
+                                        ? schedule.filter(s=>s!==game).concat(newGame)
+                                        : schedule.concat(newGame);
+                                      const conflict=validateNoBackToBack(withNew,[createTeamA,createTeamB],gameDuration);
+                                      if(conflict){
+                                        const base=game?schedule.filter(s=>s!==game):schedule;
+                                        const suggestion=findValidSlot(createTeamA,createTeamB,base);
+                                        setDragError(`⚠️ Back-to-back conflict: ${conflict}`);
+                                        setDragSuggestion(suggestion?{...suggestion,isCreate:true,gameToReplace:game||null}:null);
+                                        return;
+                                      }
+                                      const newSchedule=game
+                                        ? schedule.map(s=>s===game?newGame:s)
+                                        : [...schedule,newGame];
+                                      setSchedule(newSchedule);
+                                      setDragError(null);setDragSuggestion(null);
+                                      setCreateMode(false);setCreateTeamA("");setCreateTeamB("");
+                                      return;
+                                    }
+
+                                    // ── Normal move/select mode ──
                                     if(selectedGame===null){
-                                      if(game)setSelectedGame(gameIdx);
+                                      if(game) setSelectedGame(gameIdx);
                                     } else {
                                       if(gameIdx===selectedGame){setSelectedGame(null);return;}
                                       doMoveOrSwap(selectedGame,game);
@@ -1734,7 +1876,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                       }:undefined}
                                       onDragEnd={()=>setDragOver(null)}
                                       style={{
-                                        background:dragOver===`${slotTime}-${court.id}`?P.accent+"22":isSelected?P.accent+"33":isTarget&&game?P.purple+"22":isTarget?P.accent+"12":closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
+                                        background:dragOver===`${slotTime}-${court.id}`?P.accent+"22":isSelected?P.accent+"33":createMode&&createTeamA&&createTeamB&&!closed?P.purple+"15":isTarget&&game?P.purple+"22":isTarget?P.accent+"12":closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
                                         borderLeft:ci>0?`1px solid ${P.border}`:"none",
                                         padding:"8px 11px",minHeight:60,display:"flex",flexDirection:"column",justifyContent:"center",
                                         opacity:closed?0.45:1,
@@ -1758,6 +1900,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                           </div>
                                         </div>
                                         :isTarget?<div style={{color:P.accent+"88",fontSize:11,fontStyle:"italic"}}>tap to place here</div>
+                                        :createMode&&createTeamA&&createTeamB?<div style={{color:P.purple+"88",fontSize:11,fontStyle:"italic"}}>tap to place here</div>
                                         :<div style={{color:P.border,fontSize:11,fontStyle:"italic"}}>— open —</div>}
                                     </div>
                                   );
@@ -1802,7 +1945,10 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                     })}
                   </div>
                 </div>
-                <div style={{marginTop:20}}><Btn onClick={buildSchedule} variant="secondary">↺ Regenerate</Btn></div>
+                <div style={{marginTop:20,display:"flex",gap:10,flexWrap:"wrap"}}>
+                  <Btn onClick={buildSchedule} variant="secondary">↺ Regenerate</Btn>
+                  <Btn variant="purple" onClick={()=>{setCreateMode(true);setSelectedGame(null);setCreateTeamA("");setCreateTeamB("");}}>✏️ Create Game</Btn>
+                </div>
               </>
             ))()}
           </div>

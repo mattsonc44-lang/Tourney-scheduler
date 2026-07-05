@@ -38,6 +38,26 @@ function roundRobinPairs(teamIds) {
 }
 const matchKey=(a,b)=>[a,b].sort().join("__");
 
+// Check back-to-back for a list of teams in a proposed schedule.
+// Returns a conflict description string, or null if clean.
+function validateNoBackToBack(schedule, teamIds, gameDurationMins) {
+  for(const teamId of teamIds){
+    const games = schedule
+      .filter(s => s.match.home===teamId || s.match.away===teamId)
+      .sort((a,b) => {
+        if(a.date!==b.date) return a.date.localeCompare(b.date);
+        return a.absTimeMins - b.absTimeMins;
+      });
+    for(let i=1;i<games.length;i++){
+      if(games[i].date===games[i-1].date &&
+         games[i].absTimeMins - games[i-1].absTimeMins === gameDurationMins){
+        return `${games[i-1].timeLabel}→${games[i].timeLabel} on ${fmtDate(games[i].date)}`;
+      }
+    }
+  }
+  return null;
+}
+
 // ─── STORAGE ─────────────────────────────────────────────────────────────────
 const LS_INDEX="ts_index";
 const lsKey=id=>`ts_data_${id}`;
@@ -59,6 +79,7 @@ function serializeState(state) {
     groupBlockRules: state.groupBlockRules,
     linkedGroups: state.linkedGroups,
     pinnedMatchups: state.pinnedMatchups,
+    mustPlayMatchups: [...(state.mustPlayMatchups||[])],
     excludedMatchups: state.excludedMatchups,
   };
 }
@@ -93,7 +114,7 @@ function blankState(){
     groups:[],teams:{},
     courts:[{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:today,open:"08:00",close:"17:00"}]}],
     courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,teamGameOverrides:{},groupBlockRules:{},linkedGroups:[],
-    pinnedMatchups:{},excludedMatchups:new Set(),
+    pinnedMatchups:{},mustPlayMatchups:new Set(),excludedMatchups:new Set(),
   };
 }
 
@@ -108,6 +129,7 @@ const Btn=({children,onClick,variant="primary",small,disabled,style={}})=>{
     danger:{background:"#c0392b18",color:P.red,border:`1px solid ${P.red}44`},
     ghost:{background:"transparent",color:P.muted,border:`1px solid ${P.border}`},
     success:{background:"#1a3d28",color:P.green,border:`1px solid ${P.green}44`},
+    purple:{background:P.purple+"22",color:P.purple,border:`1px solid ${P.purple}44`},
     pin:{background:P.blue+"22",color:P.blue,border:`1px solid ${P.blue}44`},
   };
   return <button style={{...base,...v[variant]}} onClick={disabled?undefined:onClick}>{children}</button>;
@@ -153,19 +175,11 @@ const DateBadge=({dateStr})=>(
 
 // ─── MATCHUP ROW ─────────────────────────────────────────────────────────────
 // Each matchup can be: excluded | free (auto-schedule) | pinned (fixed slot)
-function MatchupRow({ teamA, teamB, mkey, status, pin, courts, allDates, onExclude, onFree, onPin, onUpdatePin }) {
-  // status: "excluded" | "free" | "pinned"
+function MatchupRow({ teamA, teamB, mkey, status, pin, courts, allDates, onExclude, onFree, onPin, onMustPlay, onUpdatePin }) {
   const [expanding, setExpanding] = useState(false);
 
-  const pinBg    = P.blue+"18";
-  const pinBdr   = P.blue+"66";
-  const freeBg   = P.green+"12";
-  const freeBdr  = P.green+"55";
-  const exclBg   = P.bg;
-  const exclBdr  = P.border;
-
-  const bg  = status==="pinned"?pinBg  : status==="free"?freeBg  : exclBg;
-  const bdr = status==="pinned"?pinBdr : status==="free"?freeBdr : exclBdr;
+  const bg  = status==="pinned"?P.blue+"18"  : status==="mustPlay"?P.purple+"18" : status==="free"?P.green+"12" : P.bg;
+  const bdr = status==="pinned"?P.blue+"66"  : status==="mustPlay"?P.purple+"66" : status==="free"?P.green+"55" : P.border;
 
   return (
     <div style={{border:`1.5px solid ${bdr}`,background:bg,borderRadius:9,overflow:"hidden",marginBottom:7}}>
@@ -183,6 +197,12 @@ function MatchupRow({ teamA, teamB, mkey, status, pin, courts, allDates, onExclu
             📌 {pin?.date?fmtDate(pin.date):""} {pin?.time?fmtTime(timeMins(pin.time)):""} {pin?.courtId?(courts.find(c=>c.id===pin.courtId)?.name||""):""}
           </span>
         )}
+        {status==="mustPlay"&&(
+          <span style={{background:P.purple+"22",color:P.purple,border:`1px solid ${P.purple}44`,
+            borderRadius:20,padding:"2px 8px",fontSize:11,fontWeight:700}}>
+            🎯 must play — auto-scheduled
+          </span>
+        )}
         {status==="free"&&(
           <span style={{background:P.green+"18",color:P.green,border:`1px solid ${P.green}44`,
             borderRadius:20,padding:"2px 8px",fontSize:11,fontWeight:700}}>auto-schedule</span>
@@ -194,10 +214,11 @@ function MatchupRow({ teamA, teamB, mkey, status, pin, courts, allDates, onExclu
 
         {/* Actions */}
         <div style={{marginLeft:"auto",display:"flex",gap:5}}>
-          {status!=="free"    && <Btn small variant="success" onClick={onFree}>Auto</Btn>}
-          {status!=="pinned"  && <Btn small variant="pin" onClick={()=>{onPin();setExpanding(true);}}>📌 Pin</Btn>}
-          {status!=="excluded"&& <Btn small variant="danger" onClick={onExclude}>✕ Exclude</Btn>}
-          {status==="pinned"  && <Btn small variant="secondary" onClick={()=>setExpanding(e=>!e)}>{expanding?"▲":"▼"}</Btn>}
+          {status!=="free"     && <Btn small variant="success" onClick={onFree}>Auto</Btn>}
+          {status!=="mustPlay" && status!=="pinned" && <Btn small variant="purple" onClick={onMustPlay}>🎯 Must Play</Btn>}
+          {status!=="pinned"   && <Btn small variant="pin" onClick={()=>{onPin();setExpanding(true);}}>📌 Pin Time</Btn>}
+          {status!=="excluded" && <Btn small variant="danger" onClick={onExclude}>✕ Exclude</Btn>}
+          {status==="pinned"   && <Btn small variant="secondary" onClick={()=>setExpanding(e=>!e)}>{expanding?"▲":"▼"}</Btn>}
         </div>
       </div>
 
@@ -330,7 +351,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
 }
 
 // ─── SCHEDULER ───────────────────────────────────────────────────────────────
-function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules}){
+function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules}){
 
   const warnings = [];
   const TARGET = targetGamesPerTeam||4;
@@ -400,10 +421,10 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     return true;
   };
 
-  const place = (sk, courtId, home, away, groupId, isPinned, isPrimary) => {
+  const place = (sk, courtId, home, away, groupId, isPinned, isPrimary, isMustPlay=false) => {
     const meta = slotMeta[sk];
     resultSlots.push({slotKey:sk, dayIdx:meta.dayIdx, date:meta.date, absTimeMins:meta.absTimeMins,
-      timeLabel:meta.timeLabel, courtId, match:{groupId,home,away}, isPinned, isPrimary:isPrimary||false});
+      timeLabel:meta.timeLabel, courtId, match:{groupId,home,away}, isPinned, isPrimary:isPrimary||false, isMustPlay});
     usedCourtSlot[`${courtId}-${sk}`]=true;
     slotTeams[sk]=slotTeams[sk]||new Set();
     slotTeams[sk].add(home); slotTeams[sk].add(away);
@@ -435,6 +456,24 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       if(!court||!courtSlots[court.id]?.has(sk)||usedCourtSlot[`${court.id}-${sk}`]) continue;
       if(!slotMeta[sk]) slotMeta[sk]={date:p.date,dayIdx:di,absTimeMins:timeMins(p.time),timeLabel:fmtTime(timeMins(p.time))};
       place(sk,court.id,a,b,group.id,true,false);
+    }
+  }
+
+  // ── Must-play games (guaranteed, scheduler picks time/court) ────────────────
+  const mustSet = mustPlayMatchups instanceof Set ? mustPlayMatchups : new Set(mustPlayMatchups||[]);
+  for(const group of groups){
+    for(const [a,b] of roundRobinPairs(group.teams)){
+      const key=matchKey(a,b);
+      if(!mustSet.has(key)) continue;
+      if(excludedMatchups.has(key)||pinnedMatchups[key]) continue;
+      if(playedPairs.has(key)) continue;
+      const found=findSlot(a,b,group.id);
+      if(found){
+        place(found.sk,found.court.id,a,b,group.id,false,
+          (courtGroupPrimary[found.court.id]||[]).includes(group.id),true);
+      } else {
+        warnings.push(`Must-play game ${teams[a]?.name} vs ${teams[b]?.name} could not be scheduled — no available slot.`);
+      }
     }
   }
 
@@ -539,8 +578,9 @@ export default function App(){
   // Saveable state
   const [groups,setGroups]=useState([]);
   const [teams,setTeams]=useState({});
-  const [pinnedMatchups,setPinnedMatchups]=useState({});      // key -> {date,time,courtId} or null (free)
-  const [excludedMatchups,setExcludedMatchups]=useState(new Set()); // keys that are excluded
+  const [pinnedMatchups,setPinnedMatchups]=useState({});
+  const [mustPlayMatchups,setMustPlayMatchups]=useState(new Set()); // keys guaranteed to be scheduled
+  const [excludedMatchups,setExcludedMatchups]=useState(new Set());
   const [courts,setCourts]=useState([{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:todayStr(),open:"08:00",close:"17:00"}]}]);
   const [courtGroupPrimary,setCourtGroupPrimary]=useState({});
   const [gameDuration,setGameDuration]=useState(30);
@@ -557,11 +597,14 @@ export default function App(){
   const [linkSelections,setLinkSelections]=useState([]);
   const [schedule,setSchedule]=useState(null);
   const [scheduleWarnings,setScheduleWarnings]=useState([]);
+  const [dragGame,setDragGame]=useState(null);   // index into schedule array
+  const [dragOver,setDragOver]=useState(null);   // "slotKey-courtId"
+  const [dragError,setDragError]=useState(null); // error message
 
   const currentState=useCallback(()=>({
     groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,
-    pinnedMatchups,excludedMatchups,
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,pinnedMatchups,excludedMatchups]);
+    pinnedMatchups,mustPlayMatchups:[...mustPlayMatchups],excludedMatchups,
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,pinnedMatchups,mustPlayMatchups,excludedMatchups]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
@@ -570,6 +613,7 @@ export default function App(){
     setTeamGameOverrides(st.teamGameOverrides||{});setGroupBlockRules(st.groupBlockRules||{});
     setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
+    setMustPlayMatchups(new Set(st.mustPlayMatchups||[]));
     setExcludedMatchups(st.excludedMatchups instanceof Set?st.excludedMatchups:new Set(st.excludedMatchups||[]));
     setSchedule(null);setScheduleWarnings([]);setTab("groups");
   };
@@ -600,21 +644,30 @@ export default function App(){
   const setMatchupFree=key=>{
     setPinnedMatchups(p=>{const n={...p};delete n[key];return n;});
     setExcludedMatchups(s=>{const n=new Set(s);n.delete(key);return n;});
+    setMustPlayMatchups(s=>{const n=new Set(s);n.delete(key);return n;});
   };
   const setMatchupExcluded=key=>{
     setPinnedMatchups(p=>{const n={...p};delete n[key];return n;});
+    setMustPlayMatchups(s=>{const n=new Set(s);n.delete(key);return n;});
     setExcludedMatchups(s=>new Set([...s,key]));
+  };
+  const setMatchupMustPlay=key=>{
+    setPinnedMatchups(p=>{const n={...p};delete n[key];return n;});
+    setExcludedMatchups(s=>{const n=new Set(s);n.delete(key);return n;});
+    setMustPlayMatchups(s=>new Set([...s,key]));
   };
   const setMatchupPinned=key=>{
     setExcludedMatchups(s=>{const n=new Set(s);n.delete(key);return n;});
+    setMustPlayMatchups(s=>{const n=new Set(s);n.delete(key);return n;});
     setPinnedMatchups(p=>({...p,[key]:p[key]||{date:todayStr(),time:"09:00",courtId:""}}));
   };
   const updatePin=(key,field,val)=>setPinnedMatchups(p=>({...p,[key]:{...p[key],[field]:val}}));
 
   const getMatchupStatus=key=>{
-    if(excludedMatchups.has(key))return"excluded";
-    if(pinnedMatchups[key])return"pinned";
-    return"free";
+    if(excludedMatchups.has(key)) return "excluded";
+    if(pinnedMatchups[key])       return "pinned";
+    if(mustPlayMatchups.has(key)) return "mustPlay";
+    return "free";
   };
 
   // Courts
@@ -635,7 +688,7 @@ export default function App(){
   // Schedule
   const buildSchedule=()=>{
     try{
-      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules});
+      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules});
       setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
     }catch(err){
       setSchedule([]);setScheduleWarnings([`Scheduler error: ${err.message}`]);setTab("schedule");
@@ -793,6 +846,7 @@ export default function App(){
                               status={status} pin={pinnedMatchups[key]}
                               courts={courts} allDates={allDates}
                               onFree={()=>setMatchupFree(key)}
+                              onMustPlay={()=>setMatchupMustPlay(key)}
                               onPin={()=>setMatchupPinned(key)}
                               onExclude={()=>setMatchupExcluded(key)}
                               onUpdatePin={(f,v)=>updatePin(key,f,v)}
@@ -1114,6 +1168,16 @@ export default function App(){
             {schedule&&schedule.length===0&&scheduleWarnings.length===0&&<Card style={{textAlign:"center",padding:40,color:P.muted}}>No games placed.</Card>}
             {schedule&&schedule.length>0&&(()=>(
               <>
+                {dragError&&(
+                  <div style={{background:P.red+"22",border:`1px solid ${P.red}55`,borderRadius:8,
+                    padding:"10px 16px",color:P.red,marginBottom:12,fontSize:13,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <span>{dragError}</span>
+                    <span onClick={()=>setDragError(null)} style={{cursor:"pointer",marginLeft:12,fontWeight:700}}>✕</span>
+                  </div>
+                )}
+                <div style={{color:P.muted,fontSize:12,marginBottom:12}}>
+                  💡 Drag a game to another court or time slot to move it. Drag onto an occupied slot to swap.
+                </div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:16}}>
                   {allTeams.map(t=><Tag key={t.id} label={t.name} color={t.color}/>)}
                 </div>
@@ -1134,7 +1198,7 @@ export default function App(){
                           return (
                             <div key={sk} style={{display:"flex",alignItems:"stretch"}}>
                               <div style={{width:86,minWidth:86,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:P.surfaceLight,border:`1px solid ${P.border}`,borderRight:"none",borderRadius:"8px 0 0 8px",padding:"8px 4px"}}>
-                                <div style={{color:P.accent,fontWeight:700,fontSize:12,textAlign:"center"}}>{skGames[0]?.timeLabel}</div>
+                                <div style={{color:P.accent,fontWeight:700,fontSize:12,textAlign:"center"}}>{skGames[0]?.timeLabel||fmtTime(slotTime)}</div>
                                 <div style={{color:P.muted,fontSize:10}}>{gameDuration}min</div>
                               </div>
                               <div style={{flex:1,display:"grid",gridTemplateColumns:`repeat(${courts.length},1fr)`,border:`1px solid ${P.border}`,borderRadius:"0 8px 8px 0",overflow:"hidden"}}>
@@ -1145,8 +1209,60 @@ export default function App(){
                                   const grp=game?groups.find(g=>g.id===game.match.groupId):null;
                                   const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=slotTime&&slotTime<=timeMins(w.close));
                                   const closed=!courtOpen&&!game?.isPinned;
+                                  const gameIdx=game?schedule.indexOf(game):-1;
+                                  const isDragging=dragGame!==null&&dragGame===gameIdx;
+                                  const isDropTarget=dragGame!==null&&!closed;
+
                                   return (
-                                    <div key={court.id} style={{background:closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,borderLeft:ci>0?`1px solid ${P.border}`:"none",padding:"8px 11px",minHeight:60,display:"flex",flexDirection:"column",justifyContent:"center",opacity:closed?0.45:1}}>
+                                    <div key={court.id}
+                                      draggable={!!game&&!closed}
+                                      onDragStart={game?e=>{
+                                        e.dataTransfer.effectAllowed="move";
+                                        setDragGame(gameIdx);
+                                        setDragError(null);
+                                      }:undefined}
+                                      onDragOver={isDropTarget?e=>{e.preventDefault();e.dataTransfer.dropEffect="move";setDragOver(`${sk}-${court.id}`);}:undefined}
+                                      onDragLeave={()=>setDragOver(null)}
+                                      onDrop={isDropTarget?e=>{
+                                        e.preventDefault();
+                                        setDragOver(null);
+                                        if(dragGame===null||dragGame===gameIdx) return;
+                                        // Attempt move/swap
+                                        const src=schedule[dragGame];
+                                        const dst=game; // may be null (empty slot)
+                                        const newSchedule=[...schedule];
+                                        // Build what the new schedule looks like
+                                        if(dst){
+                                          // Swap: src goes to dst's slot/court, dst goes to src's slot/court
+                                          newSchedule[dragGame]={...src,slotKey:dst.slotKey,date:dst.date,dayIdx:dst.dayIdx,absTimeMins:dst.absTimeMins,timeLabel:dst.timeLabel,courtId:dst.courtId};
+                                          const dstIdx=schedule.indexOf(dst);
+                                          newSchedule[dstIdx]={...dst,slotKey:src.slotKey,date:src.date,dayIdx:src.dayIdx,absTimeMins:src.absTimeMins,timeLabel:src.timeLabel,courtId:src.courtId};
+                                        } else {
+                                          // Move to empty slot — compute dayIdx from date
+                                          const dIdx=scheduleDatesSorted.indexOf(date);
+                                          newSchedule[dragGame]={...src,slotKey:sk,date,dayIdx:dIdx,absTimeMins:slotTime,timeLabel:fmtTime(slotTime),courtId:court.id};
+                                        }
+                                        // Validate back-to-back for affected teams
+                                        const affectedTeams=new Set([src.match.home,src.match.away,...(dst?[dst.match.home,dst.match.away]:[])]);
+                                        const conflict=validateNoBackToBack(newSchedule,[...affectedTeams],gameDuration);
+                                        if(conflict){
+                                          setDragError(`⚠️ Back-to-back conflict: ${conflict}`);
+                                        } else {
+                                          setSchedule(newSchedule);
+                                          setDragError(null);
+                                        }
+                                        setDragGame(null);
+                                      }:undefined}
+                                      onDragEnd={()=>{setDragGame(null);setDragOver(null);}}
+                                      style={{
+                                        background:isDragging?"#ffffff18":dragOver===`${sk}-${court.id}`?P.accent+"22":closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
+                                        borderLeft:ci>0?`1px solid ${P.border}`:"none",
+                                        padding:"8px 11px",minHeight:60,display:"flex",flexDirection:"column",justifyContent:"center",
+                                        opacity:isDragging?0.4:closed?0.45:1,
+                                        cursor:game&&!closed?"grab":"default",
+                                        outline:dragOver===`${sk}-${court.id}`?`2px solid ${P.accent}`:"none",
+                                        transition:"background .1s,outline .1s",
+                                      }}>
                                       <div style={{color:P.muted,fontSize:10,marginBottom:4,fontWeight:600}}>{court.name}{court.location?` · ${court.location}`:""}</div>
                                       {closed?<div style={{color:P.border,fontSize:11,fontStyle:"italic"}}>— closed —</div>
                                         :game&&home&&away?<div>
@@ -1158,9 +1274,10 @@ export default function App(){
                                           <div style={{display:"flex",gap:4,marginTop:3,flexWrap:"wrap"}}>
                                             {grp&&<span style={{fontSize:10,color:P.muted,background:P.bg,borderRadius:4,padding:"1px 5px",border:`1px solid ${P.border}`}}>{grp.name}</span>}
                                             {game.isPinned&&<span style={{fontSize:10,color:P.blue,background:P.blue+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.blue}44`}}>📌 pinned</span>}
-                                            {game.isPrimary&&!game.isPinned&&<span style={{fontSize:10,color:P.accent,background:P.accent+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.accent}44`}}>★ primary</span>}
+                                            {game.isMustPlay&&!game.isPinned&&<span style={{fontSize:10,color:P.purple,background:P.purple+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.purple}44`}}>🎯 must play</span>}
+                                            {game.isPrimary&&!game.isPinned&&!game.isMustPlay&&<span style={{fontSize:10,color:P.accent,background:P.accent+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.accent}44`}}>★ primary</span>}
                                           </div>
-                                        </div>:<div style={{color:P.border,fontSize:11,fontStyle:"italic"}}>— open —</div>}
+                                        </div>:<div style={{color:isDropTarget?P.accent+"88":P.border,fontSize:11,fontStyle:"italic"}}>{isDropTarget?"drop here":"— open —"}</div>}
                                     </div>
                                   );
                                 })}
@@ -1195,6 +1312,7 @@ export default function App(){
                                 <span style={{color:opp?.color,fontWeight:600,fontSize:13,flex:1}}>{opp?.name}</span>
                                 <span style={{color:P.muted,fontSize:11}}>{crt?.name}</span>
                                 {s.isPinned&&<span style={{fontSize:10,color:P.blue}}>📌</span>}
+                                {s.isMustPlay&&!s.isPinned&&<span style={{fontSize:10,color:P.purple}}>🎯</span>}
                               </div>
                             );
                           })}

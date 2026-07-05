@@ -501,121 +501,92 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   // ── Main scheduler ──────────────────────────────────────────────────────────
   const allTeamIds = groups.flatMap(g=>g.teams);
 
-  const countAvailableSlots = (id) => {
-    let count = 0;
-    for(const sk of allSlotKeys){
-      const playing = slotTeams[sk]||new Set();
-      if(playing.has(id)) continue;
-      const prev = prevSlot[sk];
-      if(prev!==undefined && (slotTeams[prev]||new Set()).has(id)) continue;
-      if(courts.some(c => courtSlots[c.id].has(sk) && !usedCourtSlot[`${c.id}-${sk}`])) count++;
-    }
-    return count;
-  };
-
-  const findBestOpponent = (home, maxOpponentGames, homeGroup, blockedGroups) => {
-    const groupBlocked = (id) => {
-      const og = groups.find(g=>g.teams.includes(id));
-      return og && blockedGroups.includes(og.id);
-    };
-    // Candidates: haven't played home, not excluded, not group-blocked, at or below maxOpponentGames
-    const candidates = allTeamIds.filter(id => {
-      if(id===home) return false;
-      if(playedPairs.has(matchKey(home,id))) return false;
-      if(excludedMatchups.has(matchKey(home,id))) return false;
-      if(groupBlocked(id)) return false;
-      if((teamCount[id]||0) > maxOpponentGames) return false;
-      return true;
-    }).sort((a,b) => {
-      // Same group first
-      const ag=groups.find(g=>g.teams.includes(a));
-      const bg=groups.find(g=>g.teams.includes(b));
-      const aSame=ag?.id===homeGroup?.id?0:1;
-      const bSame=bg?.id===homeGroup?.id?0:1;
-      if(aSame!==bSame) return aSame-bSame;
-      // Fewest games first
-      const gd=(teamCount[a]||0)-(teamCount[b]||0);
-      if(gd!==0) return gd;
-      // Most constrained first (fewest remaining slots)
-      return countAvailableSlots(a)-countAvailableSlots(b);
-    });
-    const gid = homeGroup?.id || groups[0]?.id;
-    for(const away of candidates){
-      const found = findSlot(home, away, gid);
-      if(found) return {away, found};
-    }
-    return null;
-  };
-
-  // Level-based scheduling:
-  // Level 1: get everyone to 1 game before anyone gets 2
-  // Level 2: get everyone to 2 before anyone gets 3
-  // etc. up to TARGET
-  // This prevents any team from going to game 4 while others still have 2.
+  // Level-based: complete each level before advancing.
+  // Level 1 = everyone gets game 1 before anyone gets game 2, etc.
+  // Within each level: most constrained teams (fewest valid opponents) go first.
+  // Same-group opponents preferred, cross-group allowed.
   for(let level=1; level<=TARGET; level++){
-    let progress = true;
-    while(progress){
-      progress = false;
-      // Teams that haven't reached this level yet, most constrained first
-      const needy = allTeamIds
-        .filter(id => (teamCount[id]||0) < level && (teamCount[id]||0) < teamCap(id))
-        .sort((a,b) => {
-          const gd=(teamCount[a]||0)-(teamCount[b]||0);
-          if(gd!==0) return gd;
-          return countAvailableSlots(a)-countAvailableSlots(b);
+    let changed=true;
+    while(changed){
+      changed=false;
+      const needy=allTeamIds
+        .filter(id=>(teamCount[id]||0)<level && (teamCount[id]||0)<teamCap(id))
+        .sort((a,b)=>{
+          // Most constrained first: fewest unplayed opponents also under this level
+          const aOpts=allTeamIds.filter(x=>{
+            if(x===a||playedPairs.has(matchKey(a,x)))return false;
+            if((teamCount[x]||0)>=level)return false;
+            const og=groups.find(g=>g.teams.includes(x));
+            const hg=groups.find(g=>g.teams.includes(a));
+            const blocked=(groupBlockRules&&hg)?(groupBlockRules[hg.id]||[]):[];
+            if(og&&blocked.includes(og.id))return false;
+            return true;
+          }).length;
+          const bOpts=allTeamIds.filter(x=>{
+            if(x===b||playedPairs.has(matchKey(b,x)))return false;
+            if((teamCount[x]||0)>=level)return false;
+            const og=groups.find(g=>g.teams.includes(x));
+            const hg=groups.find(g=>g.teams.includes(b));
+            const blocked=(groupBlockRules&&hg)?(groupBlockRules[hg.id]||[]):[];
+            if(og&&blocked.includes(og.id))return false;
+            return true;
+          }).length;
+          if(aOpts!==bOpts)return aOpts-bOpts;
+          return(teamCount[a]||0)-(teamCount[b]||0);
         });
+
       for(const home of needy){
-        if((teamCount[home]||0) >= level) continue;
-        const homeGroup = groups.find(g=>g.teams.includes(home));
-        const blockedGroups = (groupBlockRules&&homeGroup)?(groupBlockRules[homeGroup.id]||[]):[];
-        // At this level, opponent can be at most level-1 games (same level or behind)
-        // This prevents pairing with teams already ahead
-        const result = findBestOpponent(home, level-1, homeGroup, blockedGroups)
-                    || findBestOpponent(home, level,   homeGroup, blockedGroups);  // same level ok too
-        if(result){
-          const {away,found}=result;
-          const gid=homeGroup?.id||groups[0]?.id;
-          place(found.sk,found.court.id,home,away,gid,false,(courtGroupPrimary[found.court.id]||[]).includes(gid));
-          progress=true;
+        if((teamCount[home]||0)>=level)continue;
+        const hg=groups.find(g=>g.teams.includes(home));
+        const blockedGroups=(groupBlockRules&&hg)?(groupBlockRules[hg.id]||[]):[];
+        const opps=allTeamIds.filter(id=>{
+          if(id===home||playedPairs.has(matchKey(home,id)))return false;
+          if(excludedMatchups.has(matchKey(home,id)))return false;
+          if((teamCount[id]||0)>=level)return false;
+          const og=groups.find(g=>g.teams.includes(id));
+          if(og&&blockedGroups.includes(og.id))return false;
+          return true;
+        }).sort((a,b)=>{
+          const ag=groups.find(g=>g.teams.includes(a));
+          const bg=groups.find(g=>g.teams.includes(b));
+          const as=ag?.id===hg?.id?0:1,bs=bg?.id===hg?.id?0:1;
+          if(as!==bs)return as-bs;
+          return(teamCount[a]||0)-(teamCount[b]||0);
+        });
+        for(const away of opps){
+          const gid=hg?.id||groups[0]?.id;
+          const found=findSlot(home,away,gid);
+          if(found){
+            place(found.sk,found.court.id,home,away,gid,false,(courtGroupPrimary[found.court.id]||[]).includes(gid));
+            changed=true;
+            break;
+          }
         }
       }
     }
   }
 
-  // ── Rescue pass: any team still under TARGET gets matched with anyone available ─
+  // Overflow: teams with explicit cap > TARGET fill remaining slots
   {
-    const stuck = allTeamIds.filter(id => (teamCount[id]||0) < TARGET);
-    if(stuck.length > 0){
-      stuck.sort((a,b) => countAvailableSlots(a)-countAvailableSlots(b));
-      for(const home of stuck){
-        if((teamCount[home]||0) >= TARGET) continue;
-        const homeGroup = groups.find(g=>g.teams.includes(home));
-        const gid = homeGroup?.id||groups[0]?.id;
-        const candidates = allTeamIds
-          .filter(id => id!==home && !playedPairs.has(matchKey(home,id)) && !excludedMatchups.has(matchKey(home,id)))
-          .sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
-        for(const away of candidates){
-          const found = findSlot(home, away, gid);
-          if(found){ place(found.sk,found.court.id,home,away,gid,false,false); break; }
-        }
-      }
-    }
-  }
-
-  // ── Overflow: teams with explicit cap > TARGET get extra games if slots remain ─
-  {
-    const overTeams = allTeamIds.filter(id => teamCap(id) > TARGET && (teamCount[id]||0) < teamCap(id));
+    const overTeams=allTeamIds.filter(id=>teamCap(id)>TARGET&&(teamCount[id]||0)<teamCap(id));
     for(const home of overTeams){
-      if((teamCount[home]||0) >= teamCap(home)) continue;
-      const homeGroup = groups.find(g=>g.teams.includes(home));
-      const gid = homeGroup?.id||groups[0]?.id;
-      const candidates = allTeamIds
-        .filter(id => id!==home && !playedPairs.has(matchKey(home,id)) && !excludedMatchups.has(matchKey(home,id)) && (teamCount[id]||0)<teamCap(id))
-        .sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
-      for(const away of candidates){
-        const found = findSlot(home, away, gid);
-        if(found){ place(found.sk,found.court.id,home,away,gid,false,false); break; }
-      }
+      if((teamCount[home]||0)>=teamCap(home))continue;
+      const hg=groups.find(g=>g.teams.includes(home));
+      const gid=hg?.id||groups[0]?.id;
+      const opps=allTeamIds.filter(id=>id!==home&&!playedPairs.has(matchKey(home,id))&&!excludedMatchups.has(matchKey(home,id))&&(teamCount[id]||0)<teamCap(id)).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
+      for(const away of opps){const found=findSlot(home,away,gid);if(found){place(found.sk,found.court.id,home,away,gid,false,false);break;}}
+    }
+  }
+
+  // Rescue: any team still under TARGET gets matched with anyone available
+  {
+    const stuck=allTeamIds.filter(id=>(teamCount[id]||0)<TARGET).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
+    for(const home of stuck){
+      if((teamCount[home]||0)>=TARGET)continue;
+      const hg=groups.find(g=>g.teams.includes(home));
+      const gid=hg?.id||groups[0]?.id;
+      const opps=allTeamIds.filter(id=>id!==home&&!playedPairs.has(matchKey(home,id))&&!excludedMatchups.has(matchKey(home,id))).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
+      for(const away of opps){const found=findSlot(home,away,gid);if(found){place(found.sk,found.court.id,home,away,gid,false,false);break;}}
     }
   }
 

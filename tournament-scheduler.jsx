@@ -84,8 +84,8 @@ function serializeState(state) {
     teamRestrictions: state.teamRestrictions,
     linkedGroups: state.linkedGroups,
     pinnedMatchups: state.pinnedMatchups,
-    mustPlayMatchups: [...(state.mustPlayMatchups||[])],
-    excludedMatchups: state.excludedMatchups,
+    mustPlayMatchups: [...(state.mustPlayMatchups instanceof Set ? state.mustPlayMatchups : (state.mustPlayMatchups||[]))],
+    excludedMatchups: [...(state.excludedMatchups instanceof Set ? state.excludedMatchups : (state.excludedMatchups||[]))],
   };
 }
 function deserializeState(raw) {
@@ -872,7 +872,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const doSave=useCallback(async(state,id,name)=>{
     setSaveError(null);
     try{
-      const serialized={...state,excludedMatchups:[...state.excludedMatchups],mustPlayMatchups:[...state.mustPlayMatchups]};
+      const serialized = serializeState(state);
       const result=await saveTournamentToDB(id||null,name||"Untitled Tournament",serialized,user.id);
       if(!id){
         setTournamentId(result.id);
@@ -906,7 +906,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   };
   const handleNew=async(name)=>{
     const st=blankState();
-    const serialized={...serializeState(st),excludedMatchups:[],mustPlayMatchups:[]};
+    const serialized = serializeState(st);
     const result=await saveTournamentToDB(null,name,serialized,user.id);
     if(result){
       setTournamentId(result.id);setTournamentName(name);

@@ -570,9 +570,10 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
           place(found.sk, found.court.id, home, away, gid, false,
             (courtGroupPrimary[found.court.id]||[]).includes(gid));
           progress = true;
-          break;
+          break; // restart outer while loop with fresh counts
         }
       }
+      if(progress) break; // restart from top of needy list with fresh counts
     }
   }
 

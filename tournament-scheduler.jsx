@@ -55,6 +55,7 @@ function serializeState(state) {
     courtGroupPrimary: state.courtGroupPrimary,
     gameDuration: state.gameDuration,
     targetGamesPerTeam: state.targetGamesPerTeam,
+    teamGameOverrides: state.teamGameOverrides,
     linkedGroups: state.linkedGroups,
     pinnedMatchups: state.pinnedMatchups,   // { key: null | {date,time,courtId} }
     excludedMatchups: state.excludedMatchups, // Set → array
@@ -90,7 +91,7 @@ function blankState(){
   return {
     groups:[],teams:{},
     courts:[{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:today,open:"08:00",close:"17:00"}]}],
-    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,linkedGroups:[],
+    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,teamGameOverrides:{},linkedGroups:[],
     pinnedMatchups:{},excludedMatchups:new Set(),
   };
 }
@@ -335,7 +336,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
   1. Place pinned games first (fixed slot/court, skip if conflict).
   2. Auto-schedule remaining free games using normal constraint rules.
 */
-function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam}){
+function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides}){
   // Build all matches for each group (round-robin), respecting excluded/pinned
   const pinnedGames=[];   // { groupId, home, away, date, time, courtId }
   const freeMatches=[];   // { groupId, home, away }
@@ -463,7 +464,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   // ── STEP 2: Fair distribution scheduler ──
-  // Multi-pass: first get everyone to target, then fill remaining slots.
   const TARGET = targetGamesPerTeam||4;
 
   const teamGameCount = {};
@@ -473,44 +473,80 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     teamGameCount[match.away] = (teamGameCount[match.away]||0)+1;
   };
 
-  // Seed counts from already-placed pinned games
+  // Seed counts from pinned games already placed
   for(const s of resultSlots){
     teamGameCount[s.match.home] = (teamGameCount[s.match.home]||0)+1;
     teamGameCount[s.match.away] = (teamGameCount[s.match.away]||0)+1;
   }
 
+  // Per-team cap: use override if set, otherwise use TARGET
+  const teamCap = (teamId) => (teamGameOverrides&&teamGameOverrides[teamId]) ? teamGameOverrides[teamId] : TARGET;
+
   const unscheduled = [...freeMatches];
 
-  // Run multiple passes over all slots.
-  // Pass 1: only schedule teams below target (strict fairness).
-  // Pass 2: schedule anyone still unplaced regardless of count.
-  const passes = [
-    (home, away) => (teamGameCount[home]||0) < TARGET && (teamGameCount[away]||0) < TARGET,
-    () => true,
-  ];
+  // Single-pass scoring approach:
+  // Score each candidate match so that the most under-scheduled PAIR goes first.
+  // Key insight: score by MIN games of the two teams (the most needy team drives priority).
+  // Cross-group gets a heavy penalty so within-group is always exhausted first.
+  // No hard blocking — a team at cap just raises its score so it won't be picked
+  // while other teams still need games.
 
-  for(const passFilter of passes){
+  const scoreMatch = (m, primaryGroups) => {
+    const hg = teamGameCount[m.home]||0;
+    const ag = teamGameCount[m.away]||0;
+    const hCap = teamCap(m.home);
+    const aCap = teamCap(m.away);
+    // Penalize heavily if BOTH teams are already at/over cap
+    const bothAtCap = hg >= hCap && ag >= aCap ? 1000 : 0;
+    // Primary score: min games of the pair (lower = more urgent)
+    const urgency = Math.min(hg, ag);
+    // Cross-group penalty
+    const crossGroup = primaryGroups.length>0 && !primaryGroups.includes(m.groupId) ? 20 : 0;
+    return bothAtCap + urgency * 2 + crossGroup;
+  };
+
+  // Iterate all slots; at each slot pick the best-scoring valid match
+  for(const slotKey of allSlotKeys){
     if(unscheduled.length===0) break;
+    const availCourts = courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
+    for(const court of availCourts){
+      if(unscheduled.length===0) break;
+      const primaryGroups = courtGroupPrimary[court.id]||[];
+
+      const candidates = unscheduled
+        .filter(m => canPlace(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
+        .map(m => ({ m, score: scoreMatch(m, primaryGroups) }))
+        .sort((a,b) => a.score - b.score);
+
+      if(candidates.length===0) continue;
+      // Skip this slot entirely if the best available match has both teams over cap
+      // AND there are still under-cap teams with unscheduled games
+      const best = candidates[0];
+      const anyUnderCap = unscheduled.some(m2 => {
+        const hg=teamGameCount[m2.home]||0, ag=teamGameCount[m2.away]||0;
+        return hg < teamCap(m2.home) || ag < teamCap(m2.away);
+      });
+      if(best.score >= 1000 && anyUnderCap) continue;
+
+      const match = best.m;
+      const ri = unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
+      unscheduled.splice(ri,1);
+      placeGameFair(slotKey, court.id, match, primaryGroups.includes(match.groupId));
+    }
+  }
+
+  // Final pass: place any remaining unscheduled games (no cap restriction)
+  if(unscheduled.length>0){
     for(const slotKey of allSlotKeys){
       if(unscheduled.length===0) break;
       const availCourts = courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
       for(const court of availCourts){
         if(unscheduled.length===0) break;
         const primaryGroups = courtGroupPrimary[court.id]||[];
-
         const candidates = unscheduled
-          .filter(m =>
-            canPlace(slotKey, m.home, m.away) &&
-            !usedCourtSlot[`${court.id}-${slotKey}`] &&
-            passFilter(m.home, m.away)
-          )
-          .map(m => {
-            const gamesSum = (teamGameCount[m.home]||0) + (teamGameCount[m.away]||0);
-            const crossGroup = primaryGroups.length>0 && !primaryGroups.includes(m.groupId) ? 10 : 0;
-            return { m, score: gamesSum + crossGroup };
-          })
+          .filter(m => canPlace(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
+          .map(m => ({ m, score: (teamGameCount[m.home]||0)+(teamGameCount[m.away]||0) }))
           .sort((a,b) => a.score - b.score);
-
         if(candidates.length===0) continue;
         const match = candidates[0].m;
         const ri = unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
@@ -543,6 +579,7 @@ export default function App(){
   const [courtGroupPrimary,setCourtGroupPrimary]=useState({});
   const [gameDuration,setGameDuration]=useState(30);
   const [targetGamesPerTeam,setTargetGamesPerTeam]=useState(4);
+  const [teamGameOverrides,setTeamGameOverrides]=useState({}); // { teamId: number }
   const [linkedGroups,setLinkedGroups]=useState([]);
 
   // UI-only state
@@ -555,14 +592,14 @@ export default function App(){
   const [scheduleWarnings,setScheduleWarnings]=useState([]);
 
   const currentState=useCallback(()=>({
-    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,linkedGroups,
+    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,linkedGroups,
     pinnedMatchups,excludedMatchups,
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,linkedGroups,pinnedMatchups,excludedMatchups]);
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,linkedGroups,pinnedMatchups,excludedMatchups]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
     setCourts(st.courts||[]);setCourtGroupPrimary(st.courtGroupPrimary||{});
-    setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);setLinkedGroups(st.linkedGroups||[]);
+    setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);setTeamGameOverrides(st.teamGameOverrides||{});setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
     setExcludedMatchups(st.excludedMatchups instanceof Set?st.excludedMatchups:new Set(st.excludedMatchups||[]));
     setSchedule(null);setScheduleWarnings([]);setTab("groups");
@@ -628,7 +665,7 @@ export default function App(){
 
   // Schedule
   const buildSchedule=()=>{
-    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam});
+    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides});
     setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
   };
 
@@ -944,6 +981,57 @@ export default function App(){
                     }}>{n}</button>
                   ))}
                 </div>
+              </div>
+              <div style={{marginBottom:24}}>
+                <Lbl>Per-Team Game Overrides</Lbl>
+                <div style={{fontSize:12,color:P.muted,marginBottom:10}}>
+                  Specific teams that should play more or fewer games than the target.
+                </div>
+                {allTeams.length===0&&<div style={{color:P.muted,fontSize:12,fontStyle:"italic"}}>Add teams first.</div>}
+                <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:280,overflowY:"auto"}}>
+                  {groups.map(group=>(
+                    <div key={group.id}>
+                      <div style={{color:P.accent,fontSize:11,fontWeight:700,padding:"4px 0",textTransform:"uppercase",letterSpacing:0.5}}>{group.name}</div>
+                      {group.teams.map(tid=>{
+                        const team=teams[tid]; if(!team) return null;
+                        const override=teamGameOverrides[tid];
+                        const hasOverride=override!==undefined;
+                        return (
+                          <div key={tid} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",borderRadius:7,
+                            background:hasOverride?team.color+"18":P.bg,
+                            border:`1px solid ${hasOverride?team.color+"55":P.border}`,marginBottom:4}}>
+                            <div style={{width:10,height:10,borderRadius:"50%",background:team.color,flexShrink:0}}/>
+                            <span style={{flex:1,fontWeight:600,fontSize:13,color:hasOverride?team.color:P.muted}}>{team.name}</span>
+                            <span style={{color:P.muted,fontSize:11}}>target: {targetGamesPerTeam}</span>
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              {[3,4,5,6,7,8].map(n=>(
+                                <button key={n} onClick={()=>setTeamGameOverrides(o=>n===targetGamesPerTeam&&!hasOverride?o:{...o,[tid]:n})} style={{
+                                  width:26,height:26,borderRadius:6,cursor:"pointer",fontFamily:"inherit",
+                                  fontWeight:700,fontSize:12,border:"none",transition:"all .12s",
+                                  background:(override||targetGamesPerTeam)===n?(n>targetGamesPerTeam?P.blue+"33":P.accent+"22"):P.bg,
+                                  color:(override||targetGamesPerTeam)===n?(n>targetGamesPerTeam?P.blue:P.accent):P.border,
+                                  outline:(override||targetGamesPerTeam)===n?`2px solid ${n>targetGamesPerTeam?P.blue:P.accent}`:"none",
+                                }}>{n}</button>
+                              ))}
+                              {hasOverride&&<button onClick={()=>setTeamGameOverrides(o=>{const n={...o};delete n[tid];return n;})}
+                                style={{width:22,height:22,borderRadius:5,cursor:"pointer",border:"none",
+                                  background:P.red+"22",color:P.red,fontWeight:700,fontSize:11,fontFamily:"inherit"}}>✕</button>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+                {Object.keys(teamGameOverrides).length>0&&(
+                  <div style={{marginTop:8,display:"flex",gap:6,flexWrap:"wrap"}}>
+                    {Object.entries(teamGameOverrides).map(([tid,n])=>{
+                      const team=teams[tid]; if(!team) return null;
+                      return <Tag key={tid} label={`${team.name}: ${n} games`} color={n>targetGamesPerTeam?P.blue:P.red}
+                        onRemove={()=>setTeamGameOverrides(o=>{const c={...o};delete c[tid];return c;})}/>;
+                    })}
+                  </div>
+                )}
               </div>
               <div style={{background:P.bg,borderRadius:8,padding:14,border:`1px solid ${P.border}`}}>
                 <Lbl>Summary</Lbl>

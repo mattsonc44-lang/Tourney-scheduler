@@ -566,26 +566,41 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     }
   }
 
-  // Overflow: teams with explicit cap > TARGET fill remaining slots
+  // Overflow: teams with explicit cap > TARGET fill remaining slots — respecting group blocks
   {
     const overTeams=allTeamIds.filter(id=>teamCap(id)>TARGET&&(teamCount[id]||0)<teamCap(id));
     for(const home of overTeams){
       if((teamCount[home]||0)>=teamCap(home))continue;
       const hg=groups.find(g=>g.teams.includes(home));
       const gid=hg?.id||groups[0]?.id;
-      const opps=allTeamIds.filter(id=>id!==home&&!playedPairs.has(matchKey(home,id))&&!excludedMatchups.has(matchKey(home,id))&&(teamCount[id]||0)<teamCap(id)).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
+      const blockedGroups=(groupBlockRules&&hg)?(groupBlockRules[hg.id]||[]):[];
+      const opps=allTeamIds.filter(id=>{
+        if(id===home||playedPairs.has(matchKey(home,id)))return false;
+        if(excludedMatchups.has(matchKey(home,id)))return false;
+        const og=groups.find(g=>g.teams.includes(id));
+        if(og&&blockedGroups.includes(og.id))return false;
+        if((teamCount[id]||0)>=teamCap(id))return false;
+        return true;
+      }).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
       for(const away of opps){const found=findSlot(home,away,gid);if(found){place(found.sk,found.court.id,home,away,gid,false,false);break;}}
     }
   }
 
-  // Rescue: any team still under TARGET gets matched with anyone available
+  // Rescue: any team still under TARGET — respecting group blocks
   {
     const stuck=allTeamIds.filter(id=>(teamCount[id]||0)<TARGET).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
     for(const home of stuck){
       if((teamCount[home]||0)>=TARGET)continue;
       const hg=groups.find(g=>g.teams.includes(home));
       const gid=hg?.id||groups[0]?.id;
-      const opps=allTeamIds.filter(id=>id!==home&&!playedPairs.has(matchKey(home,id))&&!excludedMatchups.has(matchKey(home,id))).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
+      const blockedGroups=(groupBlockRules&&hg)?(groupBlockRules[hg.id]||[]):[];
+      const opps=allTeamIds.filter(id=>{
+        if(id===home||playedPairs.has(matchKey(home,id)))return false;
+        if(excludedMatchups.has(matchKey(home,id)))return false;
+        const og=groups.find(g=>g.teams.includes(id));
+        if(og&&blockedGroups.includes(og.id))return false;
+        return true;
+      }).sort((a,b)=>(teamCount[a]||0)-(teamCount[b]||0));
       for(const away of opps){const found=findSlot(home,away,gid);if(found){place(found.sk,found.court.id,home,away,gid,false,false);break;}}
     }
   }

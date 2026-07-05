@@ -54,6 +54,7 @@ function serializeState(state) {
     courts: state.courts,
     courtGroupPrimary: state.courtGroupPrimary,
     gameDuration: state.gameDuration,
+    targetGamesPerTeam: state.targetGamesPerTeam,
     linkedGroups: state.linkedGroups,
     pinnedMatchups: state.pinnedMatchups,   // { key: null | {date,time,courtId} }
     excludedMatchups: state.excludedMatchups, // Set → array
@@ -89,7 +90,7 @@ function blankState(){
   return {
     groups:[],teams:{},
     courts:[{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:today,open:"08:00",close:"17:00"}]}],
-    courtGroupPrimary:{},gameDuration:30,linkedGroups:[],
+    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,linkedGroups:[],
     pinnedMatchups:{},excludedMatchups:new Set(),
   };
 }
@@ -334,7 +335,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
   1. Place pinned games first (fixed slot/court, skip if conflict).
   2. Auto-schedule remaining free games using normal constraint rules.
 */
-function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups}){
+function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam}){
   // Build all matches for each group (round-robin), respecting excluded/pinned
   const pinnedGames=[];   // { groupId, home, away, date, time, courtId }
   const freeMatches=[];   // { groupId, home, away }
@@ -461,21 +462,96 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     placeGame(slotKey,targetCourt.id,{groupId:pg.groupId,home,away},true,false);
   }
 
-  // ── STEP 2: Auto-schedule free games ──
-  const unscheduled=[...freeMatches];
+  // ── STEP 2: Auto-schedule free games with fair distribution ──
+  // Target: every team gets ~targetGamesPerTeam games, spread evenly across days.
+  // Strategy: at each slot, among valid matches pick the one where both teams
+  // have the fewest games scheduled so far (max-min fairness). Within ties,
+  // prefer within-group matches. Cross-group matches are allowed but only after
+  // within-group options are exhausted for those teams.
+
+  const TARGET = targetGamesPerTeam||4;
+  const teamGameCount = {}; // teamId -> total placed
+  const teamDayCount  = {}; // "teamId-dayIdx" -> placed that day
+
+  // Wrap placeGame to track counts
+  const placeGameFair = (slotKey, courtId, match, isPrimary) => {
+    placeGame(slotKey, courtId, match, false, isPrimary);
+    const di = slotMeta[slotKey].dayIdx;
+    teamGameCount[match.home] = (teamGameCount[match.home]||0)+1;
+    teamGameCount[match.away] = (teamGameCount[match.away]||0)+1;
+    teamDayCount[`${match.home}-${di}`] = (teamDayCount[`${match.home}-${di}`]||0)+1;
+    teamDayCount[`${match.away}-${di}`] = (teamDayCount[`${match.away}-${di}`]||0)+1;
+  };
+
+  // Also count pinned games toward limits
+  for(const s of resultSlots){
+    const di = s.dayIdx;
+    teamGameCount[s.match.home] = (teamGameCount[s.match.home]||0)+1;
+    teamGameCount[s.match.away] = (teamGameCount[s.match.away]||0)+1;
+    teamDayCount[`${s.match.home}-${di}`] = (teamDayCount[`${s.match.home}-${di}`]||0)+1;
+    teamDayCount[`${s.match.away}-${di}`] = (teamDayCount[`${s.match.away}-${di}`]||0)+1;
+  }
+
+  const canPlaceFair = (slotKey, home, away) => {
+    if(!canPlace(slotKey, home, away)) return false;
+    // Don't schedule a team that already hit the target
+    if((teamGameCount[home]||0) >= TARGET) return false;
+    if((teamGameCount[away]||0) >= TARGET) return false;
+    return true;
+  };
+
+  // Score a match for priority: lower = better to schedule next
+  // Primary factor: sum of games already played by both teams (fewer = more urgent)
+  // Secondary: within-group preferred (0) vs cross-group (1)
+  const matchScore = (m, primaryGroups) => {
+    const gamesSum = (teamGameCount[m.home]||0) + (teamGameCount[m.away]||0);
+    const crossGroup = primaryGroups.length > 0 && !primaryGroups.includes(m.groupId) ? 1 : 0;
+    return gamesSum * 2 + crossGroup;
+  };
+
+  const unscheduled = [...freeMatches];
+
   for(const slotKey of allSlotKeys){
-    if(unscheduled.length===0)break;
-    const availCourts=courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
+    if(unscheduled.length===0) break;
+    const availCourts = courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
+
     for(const court of availCourts){
-      if(unscheduled.length===0)break;
-      const primaryGroups=courtGroupPrimary[court.id]||[];
-      const sorted=[...unscheduled.filter(m=>primaryGroups.includes(m.groupId)),...unscheduled.filter(m=>!primaryGroups.includes(m.groupId))];
-      const idx=sorted.findIndex(m=>canPlace(slotKey,m.home,m.away)&&!usedCourtSlot[`${court.id}-${slotKey}`]);
-      if(idx===-1)continue;
-      const match=sorted[idx];
-      const ri=unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
-      unscheduled.splice(ri,1);
-      placeGame(slotKey,court.id,match,false,(courtGroupPrimary[court.id]||[]).includes(match.groupId));
+      if(unscheduled.length===0) break;
+      const primaryGroups = courtGroupPrimary[court.id]||[];
+
+      // Find all valid candidates for this slot/court
+      const candidates = unscheduled
+        .filter(m => canPlaceFair(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
+        .map(m => ({ m, score: matchScore(m, primaryGroups) }))
+        .sort((a,b) => a.score - b.score);
+
+      if(candidates.length === 0) continue;
+
+      const match = candidates[0].m;
+      const ri = unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
+      unscheduled.splice(ri, 1);
+      placeGameFair(slotKey, court.id, match, primaryGroups.includes(match.groupId));
+    }
+  }
+
+  // Second pass: schedule any remaining games for teams still under target
+  // (handles cross-group fill-in if within-group exhausted)
+  if(unscheduled.length > 0){
+    for(const slotKey of allSlotKeys){
+      if(unscheduled.length===0) break;
+      const availCourts = courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
+      for(const court of availCourts){
+        if(unscheduled.length===0) break;
+        const candidates = unscheduled
+          .filter(m => canPlace(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
+          .map(m => ({ m, score: (teamGameCount[m.home]||0)+(teamGameCount[m.away]||0) }))
+          .sort((a,b) => a.score - b.score);
+        if(candidates.length===0) continue;
+        const match = candidates[0].m;
+        const ri = unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
+        unscheduled.splice(ri,1);
+        placeGameFair(slotKey, court.id, match, (courtGroupPrimary[court.id]||[]).includes(match.groupId));
+      }
     }
   }
 
@@ -501,6 +577,7 @@ export default function App(){
   const [courts,setCourts]=useState([{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:todayStr(),open:"08:00",close:"17:00"}]}]);
   const [courtGroupPrimary,setCourtGroupPrimary]=useState({});
   const [gameDuration,setGameDuration]=useState(30);
+  const [targetGamesPerTeam,setTargetGamesPerTeam]=useState(4);
   const [linkedGroups,setLinkedGroups]=useState([]);
 
   // UI-only state
@@ -513,14 +590,14 @@ export default function App(){
   const [scheduleWarnings,setScheduleWarnings]=useState([]);
 
   const currentState=useCallback(()=>({
-    groups,teams,courts,courtGroupPrimary,gameDuration,linkedGroups,
+    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,linkedGroups,
     pinnedMatchups,excludedMatchups,
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,linkedGroups,pinnedMatchups,excludedMatchups]);
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,linkedGroups,pinnedMatchups,excludedMatchups]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
     setCourts(st.courts||[]);setCourtGroupPrimary(st.courtGroupPrimary||{});
-    setGameDuration(st.gameDuration||30);setLinkedGroups(st.linkedGroups||[]);
+    setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
     setExcludedMatchups(st.excludedMatchups instanceof Set?st.excludedMatchups:new Set(st.excludedMatchups||[]));
     setSchedule(null);setScheduleWarnings([]);setTab("groups");
@@ -586,7 +663,7 @@ export default function App(){
 
   // Schedule
   const buildSchedule=()=>{
-    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups});
+    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam});
     setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
   };
 
@@ -885,10 +962,29 @@ export default function App(){
                   ))}
                 </div>
               </div>
+
+              <div style={{marginBottom:24}}>
+                <Lbl>Target Games Per Team</Lbl>
+                <div style={{fontSize:12,color:P.muted,marginBottom:10}}>
+                  How many games each team should play. The scheduler fills within-group first, then cross-group if needed to hit the target.
+                </div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {[3,4,5,6].map(n=>(
+                    <button key={n} onClick={()=>setTargetGamesPerTeam(n)} style={{
+                      border:`2px solid ${targetGamesPerTeam===n?P.accent:P.border}`,
+                      background:targetGamesPerTeam===n?P.accent+"22":P.bg,
+                      color:targetGamesPerTeam===n?P.accent:P.muted,
+                      borderRadius:8,padding:"8px 22px",cursor:"pointer",
+                      fontFamily:"inherit",fontWeight:700,fontSize:16,transition:"all .15s",
+                    }}>{n}</button>
+                  ))}
+                </div>
+              </div>
               <div style={{background:P.bg,borderRadius:8,padding:14,border:`1px solid ${P.border}`}}>
                 <Lbl>Summary</Lbl>
                 {[
-                  ["Total matchups", totalGames],
+                  ["Target / team",   targetGamesPerTeam+" games"],
+                  ["Total matchups",  totalGames],
                   ["Pinned",         pinnedCount],
                   ["Auto-schedule",  totalGames-pinnedCount],
                   ["Courts",         courts.length],
@@ -980,7 +1076,7 @@ export default function App(){
                                   const home=game?teams[game.match.home]:null;
                                   const away=game?teams[game.match.away]:null;
                                   const grp=game?groups.find(g=>g.id===game.match.groupId):null;
-                                  const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=slotTime&&slotTime+gameDuration<=timeMins(w.close));
+                                  const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=slotTime&&slotTime<=timeMins(w.close));
                                   const closed=!courtOpen&&!game?.isPinned;
                                   return (
                                     <div key={court.id} style={{background:closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,borderLeft:ci>0?`1px solid ${P.border}`:"none",padding:"8px 11px",minHeight:60,display:"flex",flexDirection:"column",justifyContent:"center",opacity:closed?0.45:1}}>

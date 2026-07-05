@@ -329,270 +329,173 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
 }
 
 // ─── SCHEDULER ───────────────────────────────────────────────────────────────
-/*
-  pinnedMatchups: { matchKey: { date, time:"HH:MM", courtId } }
-  excludedMatchups: Set of matchKeys
-
-  1. Place pinned games first (fixed slot/court, skip if conflict).
-  2. Auto-schedule remaining free games using normal constraint rules.
-*/
 function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides}){
-  // Build all matches for each group (round-robin), respecting excluded/pinned
-  const pinnedGames=[];   // { groupId, home, away, date, time, courtId }
-  const freeMatches=[];   // { groupId, home, away }
 
-  for(const group of groups){
-    const pairs=roundRobinPairs(group.teams);
-    for(const [a,b] of pairs){
-      const key=matchKey(a,b);
-      if(excludedMatchups.has(key)) continue;
-      if(pinnedMatchups[key]){
-        const p=pinnedMatchups[key];
-        pinnedGames.push({groupId:group.id,home:a,away:b,...p});
-      } else {
-        freeMatches.push({groupId:group.id,home:a,away:b});
-      }
-    }
-  }
+  const warnings = [];
+  const TARGET = targetGamesPerTeam||4;
+  const teamCap = (id) => (teamGameOverrides&&teamGameOverrides[id]) ? teamGameOverrides[id] : TARGET;
 
-  if(pinnedGames.length===0&&freeMatches.length===0||courts.length===0)
-    return{slots:[],warnings:["No matches to schedule."]};
+  // ── Slot map ────────────────────────────────────────────────────────────────
+  const dateSet = new Set();
+  for(const c of courts) for(const w of (c.windows||[])) if(w.date) dateSet.add(w.date);
+  const sortedDates = [...dateSet].sort();
+  if(!sortedDates.length) return {slots:[],warnings:["No court availability dates defined."],sortedDates:[]};
 
-  // Linked map
-  const linkedMap={};
-  for(const link of linkedGroups)
-    for(const a of link){linkedMap[a]=linkedMap[a]||new Set();for(const b of link)if(a!==b)linkedMap[a].add(b);}
+  const dateIndex = {};
+  sortedDates.forEach((d,i) => dateIndex[d]=i);
 
-  // Date index
-  const dateSet=new Set();
-  for(const court of courts)for(const w of(court.windows||[]))if(w.date)dateSet.add(w.date);
-  // Also include pinned game dates
-  for(const pg of pinnedGames)if(pg.date)dateSet.add(pg.date);
-  const sortedDates=[...dateSet].sort();
-  if(sortedDates.length===0)return{slots:[],warnings:["No court availability dates defined."]};
-  const dateIndex={};sortedDates.forEach((d,i)=>dateIndex[d]=i);
-
-  // Build slot map
-  const courtSlots={};const slotMeta={};
+  const courtSlots = {};
+  const slotMeta   = {};
   for(const court of courts){
-    courtSlots[court.id]=new Set();
-    for(const w of(court.windows||[])){
-      if(!w.date||!w.open||!w.close)continue;
-      const di=dateIndex[w.date];if(di===undefined)continue;
-      const openM=timeMins(w.open),closeM=timeMins(w.close);let cur=openM;
-      while(cur<=closeM){
-        const key=di*100000+cur;
+    courtSlots[court.id] = new Set();
+    for(const w of (court.windows||[])){
+      if(!w.date||!w.open||!w.close) continue;
+      const di = dateIndex[w.date];
+      if(di===undefined) continue;
+      let cur = timeMins(w.open);
+      const closeM = timeMins(w.close);
+      while(cur <= closeM){
+        const key = di*100000+cur;
         courtSlots[court.id].add(key);
-        slotMeta[key]={dayIdx:di,date:w.date,absTimeMins:cur,timeLabel:fmtTime(cur)};
-        cur+=gameDurationMins;
+        if(!slotMeta[key]) slotMeta[key]={date:w.date,dayIdx:di,absTimeMins:cur,timeLabel:fmtTime(cur)};
+        cur += gameDurationMins;
       }
     }
   }
 
-  const allSlotKeys=[...new Set(Object.values(courtSlots).flatMap(s=>[...s]))].sort((a,b)=>a-b);
+  const allSlotKeys = [...new Set(Object.values(courtSlots).flatMap(s=>[...s]))].sort((a,b)=>a-b);
+  if(!allSlotKeys.length) return {slots:[],warnings:["No valid time slots found."],sortedDates};
 
-  // prev-slot lookup for back-to-back check
-  const prevSlotKey={};const keysByDay={};
-  for(const key of allSlotKeys){const m=slotMeta[key];(keysByDay[m.dayIdx]=keysByDay[m.dayIdx]||[]).push(key);}
+  // Back-to-back: prevSlot[key] = the immediately prior consecutive key on same day
+  const prevSlot = {};
+  const keysByDay = {};
+  for(const k of allSlotKeys)(keysByDay[slotMeta[k].dayIdx]=keysByDay[slotMeta[k].dayIdx]||[]).push(k);
   for(const dayKeys of Object.values(keysByDay)){
     dayKeys.sort((a,b)=>a-b);
-    for(let i=1;i<dayKeys.length;i++){
-      const prev=slotMeta[dayKeys[i-1]],cur=slotMeta[dayKeys[i]];
-      if(prev.absTimeMins+gameDurationMins===cur.absTimeMins)prevSlotKey[dayKeys[i]]=dayKeys[i-1];
-    }
+    for(let i=1;i<dayKeys.length;i++)
+      if(slotMeta[dayKeys[i-1]].absTimeMins+gameDurationMins===slotMeta[dayKeys[i]].absTimeMins)
+        prevSlot[dayKeys[i]]=dayKeys[i-1];
   }
 
-  const resultSlots=[];
-  const usedCourtSlot={};
-  const slotTeamsPlaying={};
-  const warnings=[];
+  // Linked teams
+  const linkedMap = {};
+  for(const link of linkedGroups)
+    for(const a of link){ linkedMap[a]=linkedMap[a]||new Set(); for(const b of link) if(a!==b) linkedMap[a].add(b); }
 
-  const placeGame=(slotKey,courtId,match,isPinned,isPrimary)=>{
-    const meta=slotMeta[slotKey];
-    resultSlots.push({
-      slotKey,dayIdx:meta.dayIdx,date:meta.date,
-      absTimeMins:meta.absTimeMins,timeLabel:meta.timeLabel,
-      courtId,match,isPinned,isPrimary:isPrimary||false,
-    });
-    usedCourtSlot[`${courtId}-${slotKey}`]=true;
-    slotTeamsPlaying[slotKey]=slotTeamsPlaying[slotKey]||new Set();
-    slotTeamsPlaying[slotKey].add(match.home);
-    slotTeamsPlaying[slotKey].add(match.away);
-  };
+  // ── State ───────────────────────────────────────────────────────────────────
+  const usedCourtSlot = {};
+  const slotTeams     = {};
+  const teamCount     = {};
+  const resultSlots   = [];
+  const playedPairs   = new Set(); // matchKey strings already scheduled
 
-  const canPlace=(slotKey,home,away)=>{
-    const playing=slotTeamsPlaying[slotKey]||new Set();
-    if(playing.has(home)||playing.has(away))return false;
-    const prevKey=prevSlotKey[slotKey];
-    if(prevKey!==undefined){
-      const pp=slotTeamsPlaying[prevKey]||new Set();
-      if(pp.has(home)||pp.has(away))return false;
-    }
-    const linked=[...(linkedMap[home]||[]),...(linkedMap[away]||[])];
-    if(linked.some(t=>playing.has(t)))return false;
+  const canPlace = (sk, home, away) => {
+    const playing = slotTeams[sk]||new Set();
+    if(playing.has(home)||playing.has(away)) return false;
+    const prev = prevSlot[sk];
+    if(prev!==undefined){ const pp=slotTeams[prev]||new Set(); if(pp.has(home)||pp.has(away)) return false; }
+    const linked = [...(linkedMap[home]||[]),...(linkedMap[away]||[])];
+    if(linked.some(t=>playing.has(t))) return false;
     return true;
   };
 
-  // ── STEP 1: Place pinned games ──
-  for(const pg of pinnedGames){
-    const{home,away,date,time,courtId}=pg;
-    if(!date||!time){
-      // Pinned but missing date/time — treat as free
-      freeMatches.push({groupId:pg.groupId,home,away});
-      continue;
-    }
-    const di=dateIndex[date];
-    if(di===undefined){warnings.push(`Pinned game ${teams[home]?.name} vs ${teams[away]?.name}: date ${date} not in any court window. Moved to auto-schedule.`);freeMatches.push({groupId:pg.groupId,home,away});continue;}
-    const slotKey=di*100000+timeMins(time);
-
-    // Determine court: if courtId specified use it; else find any available court at that slot
-    let targetCourt=courtId?courts.find(c=>c.id===courtId):null;
-    if(!targetCourt){
-      targetCourt=courts.find(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
-    }
-    if(!targetCourt||!courtSlots[targetCourt.id]?.has(slotKey)){
-      warnings.push(`Pinned game ${teams[home]?.name} vs ${teams[away]?.name}: court/time not available. Moved to auto-schedule.`);
-      freeMatches.push({groupId:pg.groupId,home,away});continue;
-    }
-    if(usedCourtSlot[`${targetCourt.id}-${slotKey}`]){
-      warnings.push(`Pinned game ${teams[home]?.name} vs ${teams[away]?.name}: court already taken at that time. Moved to auto-schedule.`);
-      freeMatches.push({groupId:pg.groupId,home,away});continue;
-    }
-    // Force-place (override back-to-back/limits for pinned games — coordinator's choice)
-    if(!slotMeta[slotKey])slotMeta[slotKey]={dayIdx:di,date,absTimeMins:timeMins(time),timeLabel:fmtTime(timeMins(time))};
-    placeGame(slotKey,targetCourt.id,{groupId:pg.groupId,home,away},true,false);
-  }
-
-  // ── STEP 2: Fair distribution scheduler ──
-  // Simple approach: flatten all matches, sort by urgency, find earliest slot for each.
-  // Any game can go any time — no group isolation needed.
-  const TARGET = targetGamesPerTeam||4;
-  const teamGameCount = {};
-
-  const placeGameFair = (slotKey, courtId, match, isPrimary) => {
-    placeGame(slotKey, courtId, match, false, isPrimary);
-    teamGameCount[match.home] = (teamGameCount[match.home]||0)+1;
-    teamGameCount[match.away] = (teamGameCount[match.away]||0)+1;
+  const place = (sk, courtId, home, away, groupId, isPinned, isPrimary) => {
+    const meta = slotMeta[sk];
+    resultSlots.push({slotKey:sk, dayIdx:meta.dayIdx, date:meta.date, absTimeMins:meta.absTimeMins,
+      timeLabel:meta.timeLabel, courtId, match:{groupId,home,away}, isPinned, isPrimary:isPrimary||false});
+    usedCourtSlot[`${courtId}-${sk}`]=true;
+    slotTeams[sk]=slotTeams[sk]||new Set();
+    slotTeams[sk].add(home); slotTeams[sk].add(away);
+    teamCount[home]=(teamCount[home]||0)+1;
+    teamCount[away]=(teamCount[away]||0)+1;
+    playedPairs.add(matchKey(home,away));
   };
 
-  for(const s of resultSlots){
-    teamGameCount[s.match.home] = (teamGameCount[s.match.home]||0)+1;
-    teamGameCount[s.match.away] = (teamGameCount[s.match.away]||0)+1;
-  }
-
-  const teamCap   = (id) => (teamGameOverrides&&teamGameOverrides[id]) ? teamGameOverrides[id] : TARGET;
-  const teamNeeds = (id) => teamCap(id) - (teamGameCount[id]||0);
-
-  const courtPrimary = {};
-  for(const court of courts) courtPrimary[court.id] = courtGroupPrimary[court.id]||[];
-
-  const findEarliestSlot = (match) => {
-    const sortedCourts = [...courts].sort((a,b)=>
-      (courtPrimary[a.id].includes(match.groupId)?0:1) - (courtPrimary[b.id].includes(match.groupId)?0:1)
-    );
-    for(const slotKey of allSlotKeys){
-      for(const court of sortedCourts){
-        if(!courtSlots[court.id].has(slotKey)) continue;
-        if(usedCourtSlot[`${court.id}-${slotKey}`]) continue;
-        if(canPlace(slotKey, match.home, match.away)) return { slotKey, court };
-      }
-    }
+  const findSlot = (home, away, groupId) => {
+    const sorted = [...courts].sort((a,b)=>
+      ((courtGroupPrimary[a.id]||[]).includes(groupId)?0:1)-((courtGroupPrimary[b.id]||[]).includes(groupId)?0:1));
+    for(const sk of allSlotKeys)
+      for(const c of sorted)
+        if(courtSlots[c.id].has(sk)&&!usedCourtSlot[`${c.id}-${sk}`]&&canPlace(sk,home,away))
+          return {sk,court:c};
     return null;
   };
 
-  // Assign each match a group-round number so we interleave fairly:
-  // Group A game 1, Group B game 1, Group C game 1, Group D game 1,
-  // Group A game 2, Group B game 2, ... etc.
-  // Within each group, pairs are ordered so each team plays evenly.
-  const buildInterleaved = () => {
-    // Build per-group pair lists, round-robin ordered so each team plays evenly
-    const perGroup = {};
-    for(const group of groups) perGroup[group.id] = [];
-    for(const m of freeMatches){
-      if(perGroup[m.groupId]) perGroup[m.groupId].push(m);
+  // ── Pinned games ────────────────────────────────────────────────────────────
+  for(const group of groups){
+    for(const [a,b] of roundRobinPairs(group.teams)){
+      const key=matchKey(a,b);
+      if(!pinnedMatchups[key]||excludedMatchups.has(key)) continue;
+      const p=pinnedMatchups[key];
+      if(!p.date||!p.time){ continue; }
+      const di=dateIndex[p.date]; if(di===undefined) continue;
+      const sk=di*100000+timeMins(p.time);
+      const court=p.courtId?courts.find(c=>c.id===p.courtId):courts.find(c=>courtSlots[c.id]?.has(sk)&&!usedCourtSlot[`${c.id}-${sk}`]);
+      if(!court||!courtSlots[court.id]?.has(sk)||usedCourtSlot[`${court.id}-${sk}`]) continue;
+      if(!slotMeta[sk]) slotMeta[sk]={date:p.date,dayIdx:di,absTimeMins:timeMins(p.time),timeLabel:fmtTime(timeMins(p.time))};
+      place(sk,court.id,a,b,group.id,true,false);
     }
-    // Interleave: take one from each group in turn
-    const result = [];
-    let maxLen = Object.values(perGroup).reduce((m,a)=>Math.max(m,a.length),0);
-    for(let i=0; i<maxLen; i++){
-      for(const group of groups){
-        const pool = perGroup[group.id];
-        if(i < pool.length) result.push(pool[i]);
-      }
-    }
-    return result;
-  };
+  }
 
-  const interleaved = buildInterleaved();
+  // ── Main scheduler ──────────────────────────────────────────────────────────
+  // Build a flat list of ALL teams
+  const allTeamIds = groups.flatMap(g=>g.teams);
 
-  // Schedule pass: try every match in interleaved order.
-  // Keep looping until no more progress.
-  const pending = [...interleaved];
+  // Keep scheduling until no progress
   let progress = true;
-  while(progress && pending.length > 0){
+  while(progress){
     progress = false;
-    // Re-sort: within the pending list, most-needed pairs first
-    // but preserve rough interleave by using group index as tiebreak
-    const groupIdx = {};
-    groups.forEach((g,i) => groupIdx[g.id] = i);
-    pending.sort((a,b) => {
-      const aN = Math.max(0,teamNeeds(a.home)) + Math.max(0,teamNeeds(a.away));
-      const bN = Math.max(0,teamNeeds(b.home)) + Math.max(0,teamNeeds(b.away));
-      if(bN !== aN) return bN - aN;
-      return groupIdx[a.groupId] - groupIdx[b.groupId];
-    });
 
-    let i = 0;
-    while(i < pending.length){
-      const match = pending[i];
-      // Drop if both teams are done
-      if(teamNeeds(match.home) <= 0 && teamNeeds(match.away) <= 0){
-        pending.splice(i, 1); continue;
-      }
-      const found = findEarliestSlot(match);
-      if(found){
-        pending.splice(i, 1);
-        placeGameFair(found.slotKey, found.court.id, match, courtPrimary[found.court.id].includes(match.groupId));
-        progress = true;
-      } else {
-        i++;
+    // Find all teams still needing games, sorted by most-needy first
+    const needy = allTeamIds
+      .filter(id => teamCount[id]===undefined || teamCount[id] < teamCap(id))
+      .sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
+
+    for(const home of needy){
+      if((teamCount[home]||0) >= teamCap(home)) continue;
+
+      // Find the best opponent: also needs games, hasn't played home yet,
+      // prefer same group, then least-games first
+      const homeGroup = groups.find(g=>g.teams.includes(home));
+
+      const opponents = allTeamIds
+        .filter(id => {
+          if(id===home) return false;
+          if(playedPairs.has(matchKey(home,id))) return false;
+          if(excludedMatchups.has(matchKey(home,id))) return false;
+          if((teamCount[id]||0) >= teamCap(id)) return false;
+          return true;
+        })
+        .sort((a,b) => {
+          // Same group first
+          const aGroup = groups.find(g=>g.teams.includes(a));
+          const bGroup = groups.find(g=>g.teams.includes(b));
+          const aSame = aGroup?.id===homeGroup?.id ? 0 : 1;
+          const bSame = bGroup?.id===homeGroup?.id ? 0 : 1;
+          if(aSame!==bSame) return aSame-bSame;
+          // Then least games first
+          return (teamCount[a]||0)-(teamCount[b]||0);
+        });
+
+      for(const away of opponents){
+        const gid = homeGroup?.id || groups[0]?.id;
+        const found = findSlot(home, away, gid);
+        if(found){
+          place(found.sk, found.court.id, home, away, gid, false,
+            (courtGroupPrimary[found.court.id]||[]).includes(gid));
+          progress = true;
+          break; // move to next needy team
+        }
       }
     }
   }
 
-  // Cross-group mop-up: fill remaining games for under-target teams
-  const underTeams = Object.values(teams).filter(t => teamNeeds(t.id) > 0);
-  if(underTeams.length >= 2){
-    const crossMatches = [];
-    for(let i=0;i<underTeams.length;i++){
-      for(let j=i+1;j<underTeams.length;j++){
-        const a=underTeams[i].id, b=underTeams[j].id;
-        const key=matchKey(a,b);
-        if(excludedMatchups.has(key)||pinnedMatchups[key]) continue;
-        const ga=groups.find(g=>g.teams.includes(a));
-        const gb=groups.find(g=>g.teams.includes(b));
-        if(!ga||!gb||ga.id===gb.id) continue;
-        crossMatches.push({groupId:ga.id, home:a, away:b});
-      }
-    }
-    crossMatches.sort((a,b)=>{
-      return (Math.max(0,teamNeeds(b.home))+Math.max(0,teamNeeds(b.away))) -
-             (Math.max(0,teamNeeds(a.home))+Math.max(0,teamNeeds(a.away)));
-    });
-    for(const match of crossMatches){
-      if(teamNeeds(match.home)<=0 && teamNeeds(match.away)<=0) continue;
-      const found = findEarliestSlot(match);
-      if(!found) continue;
-      placeGameFair(found.slotKey, found.court.id, match, false);
-    }
-  }
+  // ── Report ──────────────────────────────────────────────────────────────────
+  const under = allTeamIds.filter(id=>(teamCount[id]||0)<teamCap(id));
+  if(under.length>0)
+    warnings.push(`${under.length} team(s) have fewer than ${TARGET} games: ${under.map(id=>teams[id]?.name||id).join(", ")}`);
 
-
-
-  if(pending.length>0)
-    warnings.push(`${pending.length} game(s) could not be scheduled — check court availability windows or linked-team constraints.`);
-
-  return{slots:resultSlots,warnings,sortedDates};
+  return {slots:resultSlots, warnings, sortedDates};
 }
 
 // ─── APP ─────────────────────────────────────────────────────────────────────

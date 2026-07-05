@@ -464,97 +464,110 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   // ── STEP 2: Fair distribution scheduler ──
-  const TARGET = targetGamesPerTeam||4;
+  //
+  // Core algorithm: match-first, not slot-first.
+  // Instead of "for each slot, find the best match", we do:
+  // "sort matches by urgency, then for each match find its earliest valid slot."
+  // This guarantees every under-scheduled team gets placed before any team goes over.
+  //
+  // Multiple rounds until nothing new can be placed:
+  //   Round N: schedule matches where BOTH teams are below their cap.
+  //            Sort by combined game count (lowest first = most urgent).
+  //   After all rounds: one final slot-first pass to mop up leftovers.
 
+  const TARGET = targetGamesPerTeam||4;
   const teamGameCount = {};
+
   const placeGameFair = (slotKey, courtId, match, isPrimary) => {
     placeGame(slotKey, courtId, match, false, isPrimary);
     teamGameCount[match.home] = (teamGameCount[match.home]||0)+1;
     teamGameCount[match.away] = (teamGameCount[match.away]||0)+1;
   };
 
-  // Seed counts from pinned games already placed
+  // Seed counts from pinned games
   for(const s of resultSlots){
     teamGameCount[s.match.home] = (teamGameCount[s.match.home]||0)+1;
     teamGameCount[s.match.away] = (teamGameCount[s.match.away]||0)+1;
   }
 
-  // Per-team cap: use override if set, otherwise use TARGET
-  const teamCap = (teamId) => (teamGameOverrides&&teamGameOverrides[teamId]) ? teamGameOverrides[teamId] : TARGET;
+  const teamCap = (id) => (teamGameOverrides&&teamGameOverrides[id]) ? teamGameOverrides[id] : TARGET;
+
+  // Build a fast lookup: courtId -> preferred groupIds
+  const courtPrimary = {};
+  for(const court of courts) courtPrimary[court.id] = courtGroupPrimary[court.id]||[];
+
+  // For a match, find the earliest slot+court it can be placed in
+  // preferring courts whose primary group matches the match's group
+  const findEarliestSlot = (match) => {
+    // Sort courts: primary-court-for-this-group first
+    const sortedCourts = [...courts].sort((a,b)=>{
+      const ap = courtPrimary[a.id].includes(match.groupId) ? 0 : 1;
+      const bp = courtPrimary[b.id].includes(match.groupId) ? 0 : 1;
+      return ap - bp;
+    });
+    for(const slotKey of allSlotKeys){
+      for(const court of sortedCourts){
+        if(!courtSlots[court.id].has(slotKey)) continue;
+        if(usedCourtSlot[`${court.id}-${slotKey}`]) continue;
+        if(canPlace(slotKey, match.home, match.away)){
+          return { slotKey, court };
+        }
+      }
+    }
+    return null;
+  };
 
   const unscheduled = [...freeMatches];
 
-  // Single-pass scoring approach:
-  // Score each candidate match so that the most under-scheduled PAIR goes first.
-  // Key insight: score by MIN games of the two teams (the most needy team drives priority).
-  // Cross-group gets a heavy penalty so within-group is always exhausted first.
-  // No hard blocking — a team at cap just raises its score so it won't be picked
-  // while other teams still need games.
+  // Iterative rounds: keep going as long as we place at least one game per round
+  let progress = true;
+  while(progress && unscheduled.length > 0){
+    progress = false;
 
-  const scoreMatch = (m, primaryGroups) => {
-    const hg = teamGameCount[m.home]||0;
-    const ag = teamGameCount[m.away]||0;
-    const hCap = teamCap(m.home);
-    const aCap = teamCap(m.away);
-    // Penalize heavily if BOTH teams are already at/over cap
-    const bothAtCap = hg >= hCap && ag >= aCap ? 1000 : 0;
-    // Primary score: min games of the pair (lower = more urgent)
-    const urgency = Math.min(hg, ag);
-    // Cross-group penalty
-    const crossGroup = primaryGroups.length>0 && !primaryGroups.includes(m.groupId) ? 20 : 0;
-    return bothAtCap + urgency * 2 + crossGroup;
-  };
+    // Sort by urgency: matches where BOTH teams are furthest below cap go first
+    // Within ties, within-group (cross-group=false) before cross-group
+    unscheduled.sort((a,b)=>{
+      const aUnder = Math.min(teamCap(a.home)-(teamGameCount[a.home]||0), teamCap(a.away)-(teamGameCount[a.away]||0));
+      const bUnder = Math.min(teamCap(b.home)-(teamGameCount[b.home]||0), teamCap(b.away)-(teamGameCount[b.away]||0));
+      // Higher "under" = more urgently needs games = schedule first (descending)
+      if(bUnder !== aUnder) return bUnder - aUnder;
+      // Tie-break: within-group first
+      return 0;
+    });
 
-  // Iterate all slots; at each slot pick the best-scoring valid match
-  for(const slotKey of allSlotKeys){
-    if(unscheduled.length===0) break;
-    const availCourts = courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
-    for(const court of availCourts){
-      if(unscheduled.length===0) break;
-      const primaryGroups = courtGroupPrimary[court.id]||[];
+    for(let i = unscheduled.length - 1; i >= 0; i--){
+      const match = unscheduled[i];
+      const hUnder = teamCap(match.home) - (teamGameCount[match.home]||0);
+      const aUnder = teamCap(match.away) - (teamGameCount[match.away]||0);
 
-      const candidates = unscheduled
-        .filter(m => canPlace(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
-        .map(m => ({ m, score: scoreMatch(m, primaryGroups) }))
-        .sort((a,b) => a.score - b.score);
+      // In this round, only schedule if at least one team still needs games
+      if(hUnder <= 0 && aUnder <= 0) continue;
 
-      if(candidates.length===0) continue;
-      // Skip this slot entirely if the best available match has both teams over cap
-      // AND there are still under-cap teams with unscheduled games
-      const best = candidates[0];
-      const anyUnderCap = unscheduled.some(m2 => {
-        const hg=teamGameCount[m2.home]||0, ag=teamGameCount[m2.away]||0;
-        return hg < teamCap(m2.home) || ag < teamCap(m2.away);
-      });
-      if(best.score >= 1000 && anyUnderCap) continue;
+      const found = findEarliestSlot(match);
+      if(!found) continue;
 
-      const match = best.m;
-      const ri = unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
-      unscheduled.splice(ri,1);
-      placeGameFair(slotKey, court.id, match, primaryGroups.includes(match.groupId));
+      unscheduled.splice(i, 1);
+      placeGameFair(found.slotKey, found.court.id, match, courtPrimary[found.court.id].includes(match.groupId));
+      progress = true;
     }
   }
 
-  // Final pass: place any remaining unscheduled games (no cap restriction)
-  if(unscheduled.length>0){
-    for(const slotKey of allSlotKeys){
-      if(unscheduled.length===0) break;
-      const availCourts = courts.filter(c=>courtSlots[c.id].has(slotKey)&&!usedCourtSlot[`${c.id}-${slotKey}`]);
-      for(const court of availCourts){
-        if(unscheduled.length===0) break;
-        const primaryGroups = courtGroupPrimary[court.id]||[];
-        const candidates = unscheduled
-          .filter(m => canPlace(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
-          .map(m => ({ m, score: (teamGameCount[m.home]||0)+(teamGameCount[m.away]||0) }))
-          .sort((a,b) => a.score - b.score);
-        if(candidates.length===0) continue;
-        const match = candidates[0].m;
-        const ri = unscheduled.findIndex(m=>m.groupId===match.groupId&&m.home===match.home&&m.away===match.away);
-        unscheduled.splice(ri,1);
-        placeGameFair(slotKey, court.id, match, primaryGroups.includes(match.groupId));
-      }
+  // Mop-up pass: place any remaining games (teams at/over cap but slots still open)
+  if(unscheduled.length > 0){
+    unscheduled.sort((a,b)=>{
+      const as=(teamGameCount[a.home]||0)+(teamGameCount[a.away]||0);
+      const bs=(teamGameCount[b.home]||0)+(teamGameCount[b.away]||0);
+      return as-bs;
+    });
+    for(let i = unscheduled.length-1; i>=0; i--){
+      const match = unscheduled[i];
+      const found = findEarliestSlot(match);
+      if(!found) continue;
+      unscheduled.splice(i,1);
+      placeGameFair(found.slotKey, found.court.id, match, courtPrimary[found.court.id].includes(match.groupId));
     }
   }
+
 
   if(unscheduled.length>0)
     warnings.push(`${unscheduled.length} game(s) could not be scheduled — check court availability windows or linked-team constraints.`);

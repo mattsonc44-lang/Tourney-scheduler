@@ -534,8 +534,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     }
   }
 
-  // Second pass: schedule any remaining games for teams still under target
-  // (handles cross-group fill-in if within-group exhausted)
+  // Second pass: schedule remaining games for teams still under target
   if(unscheduled.length > 0){
     for(const slotKey of allSlotKeys){
       if(unscheduled.length===0) break;
@@ -543,7 +542,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       for(const court of availCourts){
         if(unscheduled.length===0) break;
         const candidates = unscheduled
-          .filter(m => canPlace(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
+          .filter(m => canPlaceFair(slotKey, m.home, m.away) && !usedCourtSlot[`${court.id}-${slotKey}`])
           .map(m => ({ m, score: (teamGameCount[m.home]||0)+(teamGameCount[m.away]||0) }))
           .sort((a,b) => a.score - b.score);
         if(candidates.length===0) continue;

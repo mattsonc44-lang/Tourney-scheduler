@@ -56,9 +56,10 @@ function serializeState(state) {
     gameDuration: state.gameDuration,
     targetGamesPerTeam: state.targetGamesPerTeam,
     teamGameOverrides: state.teamGameOverrides,
+    groupBlockRules: state.groupBlockRules,
     linkedGroups: state.linkedGroups,
-    pinnedMatchups: state.pinnedMatchups,   // { key: null | {date,time,courtId} }
-    excludedMatchups: state.excludedMatchups, // Set → array
+    pinnedMatchups: state.pinnedMatchups,
+    excludedMatchups: state.excludedMatchups,
   };
 }
 function deserializeState(raw) {
@@ -91,7 +92,7 @@ function blankState(){
   return {
     groups:[],teams:{},
     courts:[{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:today,open:"08:00",close:"17:00"}]}],
-    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,teamGameOverrides:{},linkedGroups:[],
+    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,teamGameOverrides:{},groupBlockRules:{},linkedGroups:[],
     pinnedMatchups:{},excludedMatchups:new Set(),
   };
 }
@@ -329,7 +330,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
 }
 
 // ─── SCHEDULER ───────────────────────────────────────────────────────────────
-function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides}){
+function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules}){
 
   const warnings = [];
   const TARGET = targetGamesPerTeam||4;
@@ -471,13 +472,19 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     for(const home of needy){
       if((teamCount[home]||0) >= teamCap(home)) continue;
       const homeGroup = groups.find(g=>g.teams.includes(home));
+      const blockedGroups = (groupBlockRules&&homeGroup) ? (groupBlockRules[homeGroup.id]||[]) : [];
 
-      // Try opponents: first those who also need games (prefer same group),
-      // then if no slot found, try opponents already at target (let them go to 5)
+      // Helper: is this opponent blocked by group rules?
+      const groupBlocked = (id) => {
+        const oppGroup = groups.find(g=>g.teams.includes(id));
+        return oppGroup && blockedGroups.includes(oppGroup.id);
+      };
+
       const needsGame = allTeamIds.filter(id => {
         if(id===home) return false;
         if(playedPairs.has(matchKey(home,id))) return false;
         if(excludedMatchups.has(matchKey(home,id))) return false;
+        if(groupBlocked(id)) return false;
         if((teamCount[id]||0) >= teamCap(id)) return false;
         return true;
       }).sort((a,b) => {
@@ -489,12 +496,12 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
         return (teamCount[a]||0)-(teamCount[b]||0);
       });
 
-      // Also build overflow opponents (already at target, as last resort)
       const overflowOpps = allTeamIds.filter(id => {
         if(id===home) return false;
         if(playedPairs.has(matchKey(home,id))) return false;
         if(excludedMatchups.has(matchKey(home,id))) return false;
-        if((teamCount[id]||0) < teamCap(id)) return false; // only at-or-over target
+        if(groupBlocked(id)) return false;
+        if((teamCount[id]||0) < teamCap(id)) return false;
         return true;
       }).sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
 
@@ -538,7 +545,8 @@ export default function App(){
   const [courtGroupPrimary,setCourtGroupPrimary]=useState({});
   const [gameDuration,setGameDuration]=useState(30);
   const [targetGamesPerTeam,setTargetGamesPerTeam]=useState(4);
-  const [teamGameOverrides,setTeamGameOverrides]=useState({}); // { teamId: number }
+  const [teamGameOverrides,setTeamGameOverrides]=useState({});
+  const [groupBlockRules,setGroupBlockRules]=useState({}); // { groupId: [blockedGroupId,...] }
   const [linkedGroups,setLinkedGroups]=useState([]);
 
   // UI-only state
@@ -551,14 +559,16 @@ export default function App(){
   const [scheduleWarnings,setScheduleWarnings]=useState([]);
 
   const currentState=useCallback(()=>({
-    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,linkedGroups,
+    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,
     pinnedMatchups,excludedMatchups,
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,linkedGroups,pinnedMatchups,excludedMatchups]);
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,pinnedMatchups,excludedMatchups]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
     setCourts(st.courts||[]);setCourtGroupPrimary(st.courtGroupPrimary||{});
-    setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);setTeamGameOverrides(st.teamGameOverrides||{});setLinkedGroups(st.linkedGroups||[]);
+    setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);
+    setTeamGameOverrides(st.teamGameOverrides||{});setGroupBlockRules(st.groupBlockRules||{});
+    setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
     setExcludedMatchups(st.excludedMatchups instanceof Set?st.excludedMatchups:new Set(st.excludedMatchups||[]));
     setSchedule(null);setScheduleWarnings([]);setTab("groups");
@@ -625,7 +635,7 @@ export default function App(){
   // Schedule
   const buildSchedule=()=>{
     try{
-      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides});
+      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules});
       setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
     }catch(err){
       setSchedule([]);setScheduleWarnings([`Scheduler error: ${err.message}`]);setTab("schedule");
@@ -795,6 +805,47 @@ export default function App(){
                 );
               })}
             </div>
+
+            {/* ── Group vs Group Rules ── */}
+            {groups.length >= 2 && (
+              <Card style={{marginTop:18}}>
+                <div style={{fontWeight:700,color:P.accent,fontSize:14,marginBottom:4}}>Group Matchup Rules</div>
+                <div style={{color:P.muted,fontSize:12,marginBottom:14}}>
+                  Block two groups from playing each other. Blocked pairs won't be used even as cross-group fill-ins.
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {groups.flatMap((ga,i) => groups.slice(i+1).map(gb => {
+                    const blocked = (groupBlockRules[ga.id]||[]).includes(gb.id);
+                    const toggle = () => setGroupBlockRules(r => {
+                      const aBlocks = r[ga.id]||[];
+                      const bBlocks = r[gb.id]||[];
+                      if(blocked){
+                        return {...r,[ga.id]:aBlocks.filter(x=>x!==gb.id),[gb.id]:bBlocks.filter(x=>x!==ga.id)};
+                      } else {
+                        return {...r,[ga.id]:[...aBlocks,gb.id],[gb.id]:[...bBlocks,ga.id]};
+                      }
+                    });
+                    return (
+                      <div key={ga.id+gb.id} onClick={toggle} style={{
+                        display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                        padding:"8px 12px",borderRadius:8,transition:"all .15s",
+                        background:blocked?P.red+"18":P.bg,
+                        border:`1px solid ${blocked?P.red+"66":P.border}`,
+                      }}>
+                        <div style={{width:18,height:18,borderRadius:4,flexShrink:0,
+                          background:blocked?P.red:"transparent",border:`2px solid ${blocked?P.red:P.border}`,
+                          display:"flex",alignItems:"center",justifyContent:"center",
+                          fontSize:11,color:"#fff",fontWeight:900}}>{blocked?"✕":""}</div>
+                        <span style={{fontWeight:600,fontSize:13,color:blocked?P.red:P.muted}}>{ga.name}</span>
+                        <span style={{color:P.muted,fontSize:12}}>will not play</span>
+                        <span style={{fontWeight:600,fontSize:13,color:blocked?P.red:P.muted}}>{gb.name}</span>
+                        {blocked&&<span style={{marginLeft:"auto",fontSize:11,color:P.red,fontWeight:700}}>BLOCKED</span>}
+                      </div>
+                    );
+                  }))}
+                </div>
+              </Card>
+            )}
           </div>
         )}
 

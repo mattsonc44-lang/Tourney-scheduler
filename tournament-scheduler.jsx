@@ -54,8 +54,6 @@ function serializeState(state) {
     courts: state.courts,
     courtGroupPrimary: state.courtGroupPrimary,
     gameDuration: state.gameDuration,
-    gamesPerTeam: state.gamesPerTeam,
-    gamesPerDay: state.gamesPerDay,
     linkedGroups: state.linkedGroups,
     pinnedMatchups: state.pinnedMatchups,   // { key: null | {date,time,courtId} }
     excludedMatchups: state.excludedMatchups, // Set → array
@@ -92,7 +90,6 @@ function blankState(){
     groups:[],teams:{},
     courts:[{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:today,open:"08:00",close:"17:00"}]}],
     courtGroupPrimary:{},gameDuration:30,linkedGroups:[],
-    gamesPerTeam:4,gamesPerDay:2,
     pinnedMatchups:{},excludedMatchups:new Set(),
   };
 }
@@ -337,7 +334,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
   1. Place pinned games first (fixed slot/court, skip if conflict).
   2. Auto-schedule remaining free games using normal constraint rules.
 */
-function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,gamesPerTeam,gamesPerDay}){
+function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups}){
   // Build all matches for each group (round-robin), respecting excluded/pinned
   const pinnedGames=[];   // { groupId, home, away, date, time, courtId }
   const freeMatches=[];   // { groupId, home, away }
@@ -404,38 +401,24 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   const resultSlots=[];
-  const usedCourtSlot={};      // "courtId-slotKey"
-  const slotTeamsPlaying={};   // slotKey -> Set<teamId>
-  const teamGameCount={};      // teamId -> total games placed
-  const teamDayCount={};       // "teamId-dayIdx" -> games that day
+  const usedCourtSlot={};
+  const slotTeamsPlaying={};
   const warnings=[];
 
-  const incTeam=(teamId,dayIdx)=>{
-    teamGameCount[teamId]=(teamGameCount[teamId]||0)+1;
-    const dk=`${teamId}-${dayIdx}`;
-    teamDayCount[dk]=(teamDayCount[dk]||0)+1;
-  };
-
-  // Helper: register a placed game
   const placeGame=(slotKey,courtId,match,isPinned,isPrimary)=>{
     const meta=slotMeta[slotKey];
     resultSlots.push({
       slotKey,dayIdx:meta.dayIdx,date:meta.date,
       absTimeMins:meta.absTimeMins,timeLabel:meta.timeLabel,
-      courtId,match,isPinned,
-      isPrimary:isPrimary||false,
+      courtId,match,isPinned,isPrimary:isPrimary||false,
     });
     usedCourtSlot[`${courtId}-${slotKey}`]=true;
     slotTeamsPlaying[slotKey]=slotTeamsPlaying[slotKey]||new Set();
     slotTeamsPlaying[slotKey].add(match.home);
     slotTeamsPlaying[slotKey].add(match.away);
-    incTeam(match.home,meta.dayIdx);
-    incTeam(match.away,meta.dayIdx);
   };
 
-  // Check constraints (used for auto-scheduled games; pinned games are forced)
   const canPlace=(slotKey,home,away)=>{
-    const meta=slotMeta[slotKey];
     const playing=slotTeamsPlaying[slotKey]||new Set();
     if(playing.has(home)||playing.has(away))return false;
     const prevKey=prevSlotKey[slotKey];
@@ -445,15 +428,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     }
     const linked=[...(linkedMap[home]||[]),...(linkedMap[away]||[])];
     if(linked.some(t=>playing.has(t)))return false;
-    // Games per team total
-    if(gamesPerTeam&&(teamGameCount[home]||0)>=gamesPerTeam)return false;
-    if(gamesPerTeam&&(teamGameCount[away]||0)>=gamesPerTeam)return false;
-    // Games per team per day
-    if(gamesPerDay){
-      const di=meta.dayIdx;
-      if((teamDayCount[`${home}-${di}`]||0)>=gamesPerDay)return false;
-      if((teamDayCount[`${away}-${di}`]||0)>=gamesPerDay)return false;
-    }
     return true;
   };
 
@@ -506,7 +480,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   if(unscheduled.length>0)
-    warnings.push(`${unscheduled.length} game(s) could not be scheduled — check court availability or constraints.`);
+    warnings.push(`${unscheduled.length} game(s) could not be scheduled — check court availability windows or linked-team constraints.`);
 
   return{slots:resultSlots,warnings,sortedDates};
 }
@@ -527,8 +501,6 @@ export default function App(){
   const [courts,setCourts]=useState([{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:todayStr(),open:"08:00",close:"17:00"}]}]);
   const [courtGroupPrimary,setCourtGroupPrimary]=useState({});
   const [gameDuration,setGameDuration]=useState(30);
-  const [gamesPerTeam,setGamesPerTeam]=useState(4);
-  const [gamesPerDay,setGamesPerDay]=useState(2);
   const [linkedGroups,setLinkedGroups]=useState([]);
 
   // UI-only state
@@ -541,14 +513,14 @@ export default function App(){
   const [scheduleWarnings,setScheduleWarnings]=useState([]);
 
   const currentState=useCallback(()=>({
-    groups,teams,courts,courtGroupPrimary,gameDuration,gamesPerTeam,gamesPerDay,linkedGroups,
+    groups,teams,courts,courtGroupPrimary,gameDuration,linkedGroups,
     pinnedMatchups,excludedMatchups,
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,gamesPerTeam,gamesPerDay,linkedGroups,pinnedMatchups,excludedMatchups]);
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,linkedGroups,pinnedMatchups,excludedMatchups]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
     setCourts(st.courts||[]);setCourtGroupPrimary(st.courtGroupPrimary||{});
-    setGameDuration(st.gameDuration||30);setGamesPerTeam(st.gamesPerTeam||4);setGamesPerDay(st.gamesPerDay||2);setLinkedGroups(st.linkedGroups||[]);
+    setGameDuration(st.gameDuration||30);setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
     setExcludedMatchups(st.excludedMatchups instanceof Set?st.excludedMatchups:new Set(st.excludedMatchups||[]));
     setSchedule(null);setScheduleWarnings([]);setTab("groups");
@@ -614,7 +586,7 @@ export default function App(){
 
   // Schedule
   const buildSchedule=()=>{
-    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,gamesPerTeam,gamesPerDay});
+    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups});
     setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
   };
 
@@ -897,10 +869,8 @@ export default function App(){
         {/* ══ SETTINGS ══════════════════════════════════════════════════════ */}
         {tab==="settings"&&(
           <div>
-            <SecHead title="Schedule Settings" sub="Configure game duration, games per team, and daily limits."/>
+            <SecHead title="Schedule Settings" sub="Configure game duration."/>
             <Card style={{maxWidth:500}}>
-
-              {/* Game Duration */}
               <div style={{marginBottom:24}}>
                 <Lbl>Game Duration</Lbl>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -915,57 +885,15 @@ export default function App(){
                   ))}
                 </div>
               </div>
-
-              {/* Games Per Team */}
-              <div style={{marginBottom:24}}>
-                <Lbl>Games Per Team (total)</Lbl>
-                <div style={{fontSize:12,color:P.muted,marginBottom:10}}>
-                  Max games each team plays across the entire tournament.
-                </div>
-                <div style={{display:"flex",gap:8}}>
-                  {[3,4,5,6].map(n=>(
-                    <button key={n} onClick={()=>setGamesPerTeam(n)} style={{
-                      border:`2px solid ${gamesPerTeam===n?P.accent:P.border}`,
-                      background:gamesPerTeam===n?P.accent+"22":P.bg,
-                      color:gamesPerTeam===n?P.accent:P.muted,
-                      borderRadius:8,padding:"8px 20px",cursor:"pointer",
-                      fontFamily:"inherit",fontWeight:700,fontSize:15,transition:"all .15s",
-                    }}>{n}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Games Per Day */}
-              <div style={{marginBottom:24}}>
-                <Lbl>Max Games Per Team Per Day</Lbl>
-                <div style={{fontSize:12,color:P.muted,marginBottom:10}}>
-                  How many games a team can play in a single day.
-                </div>
-                <div style={{display:"flex",gap:8}}>
-                  {[1,2,3,4].map(n=>(
-                    <button key={n} onClick={()=>setGamesPerDay(n)} style={{
-                      border:`2px solid ${gamesPerDay===n?P.accent:P.border}`,
-                      background:gamesPerDay===n?P.accent+"22":P.bg,
-                      color:gamesPerDay===n?P.accent:P.muted,
-                      borderRadius:8,padding:"8px 20px",cursor:"pointer",
-                      fontFamily:"inherit",fontWeight:700,fontSize:15,transition:"all .15s",
-                    }}>{n}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Summary */}
               <div style={{background:P.bg,borderRadius:8,padding:14,border:`1px solid ${P.border}`}}>
                 <Lbl>Summary</Lbl>
                 {[
-                  ["Total matchups",totalGames],
-                  ["Pinned",pinnedCount],
-                  ["Auto-schedule",totalGames-pinnedCount],
-                  ["Courts",courts.length],
+                  ["Total matchups", totalGames],
+                  ["Pinned",         pinnedCount],
+                  ["Auto-schedule",  totalGames-pinnedCount],
+                  ["Courts",         courts.length],
                   ["Available slots",totalSlots],
-                  ["Max games / team",gamesPerTeam],
-                  ["Max games / day",gamesPerDay],
-                  ["Capacity",totalSlots>=totalGames?"✅ Enough":"⚠️ May not fit"],
+                  ["Capacity",       totalSlots>=totalGames?"✅ Enough":"⚠️ May not fit"],
                 ].map(([l,v])=>(
                   <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
                     <span style={{color:P.muted}}>{l}</span>

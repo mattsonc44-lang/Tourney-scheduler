@@ -513,7 +513,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     }
     // Interleave: take one from each group in turn
     const result = [];
-    let maxLen = Math.max(...Object.values(perGroup).map(a=>a.length));
+    let maxLen = Object.values(perGroup).reduce((m,a)=>Math.max(m,a.length),0);
     for(let i=0; i<maxLen; i++){
       for(const group of groups){
         const pool = perGroup[group.id];
@@ -698,8 +698,12 @@ export default function App(){
 
   // Schedule
   const buildSchedule=()=>{
-    const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides});
-    setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
+    try{
+      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides});
+      setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
+    }catch(err){
+      setSchedule([]);setScheduleWarnings([`Scheduler error: ${err.message}`]);setTab("schedule");
+    }
   };
 
   const allTeams=Object.values(teams);

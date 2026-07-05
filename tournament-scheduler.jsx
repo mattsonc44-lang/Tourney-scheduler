@@ -1,4 +1,7 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { sb, signIn, signUp, signOut, fetchMyTournaments, loadTournamentFromDB,
+  saveTournamentToDB, deleteTournamentFromDB, getMembers, inviteMember,
+  removeMember, linkUserToInvites, subscribeTournament } from "./supabase.js";
 
 const P = {
   bg:"#0d1b2a", surface:"#1a2e45", surfaceLight:"#213652",
@@ -37,6 +40,7 @@ function roundRobinPairs(teamIds) {
   return pairs;
 }
 const matchKey=(a,b)=>[a,b].sort().join("__");
+const fmtMinsToTime=m=>`${String(Math.floor(m/60)).padStart(2,"0")}:${String(m%60).padStart(2,"0")}`;
 
 // Check back-to-back for a list of teams in a proposed schedule.
 // Returns a conflict description string, or null if clean.
@@ -77,6 +81,7 @@ function serializeState(state) {
     targetGamesPerTeam: state.targetGamesPerTeam,
     teamGameOverrides: state.teamGameOverrides,
     groupBlockRules: state.groupBlockRules,
+    teamRestrictions: state.teamRestrictions,
     linkedGroups: state.linkedGroups,
     pinnedMatchups: state.pinnedMatchups,
     mustPlayMatchups: [...(state.mustPlayMatchups||[])],
@@ -113,7 +118,7 @@ function blankState(){
   return {
     groups:[],teams:{},
     courts:[{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:today,open:"08:00",close:"17:00"}]}],
-    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,teamGameOverrides:{},groupBlockRules:{},linkedGroups:[],
+    courtGroupPrimary:{},gameDuration:30,targetGamesPerTeam:4,teamGameOverrides:{},groupBlockRules:{},teamRestrictions:{},linkedGroups:[],
     pinnedMatchups:{},mustPlayMatchups:new Set(),excludedMatchups:new Set(),
   };
 }
@@ -257,17 +262,16 @@ function MatchupRow({ teamA, teamB, mkey, status, pin, courts, allDates, onExclu
 }
 
 // ─── TOURNAMENT DRAWER ───────────────────────────────────────────────────────
-function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSave,onRename,onDelete}){
-  const [index,setIndex]=useState([]);
+function TournamentDrawer({open,onClose,currentId,currentName,myTournaments,tournamentsLoading,onNew,onLoad,onSave,onRename,onDelete}){
   const [renaming,setRenaming]=useState(null);
   const [renameVal,setRenameVal]=useState("");
   const [newName,setNewName]=useState("");
   const [confirmDelete,setConfirmDelete]=useState(null);
-  useEffect(()=>{if(open)setIndex(loadIndex());},[open]);
-  const handleSave=()=>{onSave();setIndex(loadIndex());};
+  const index = myTournaments||[];
+  const handleSave=()=>{onSave();};
   const handleLoad=id=>{onLoad(id);onClose();};
-  const handleDelete=id=>{onDelete(id);setIndex(loadIndex());setConfirmDelete(null);};
-  const handleRename=id=>{if(!renameVal.trim())return;onRename(id,renameVal.trim());setIndex(loadIndex());setRenaming(null);};
+  const handleDelete=id=>{onDelete(id);setConfirmDelete(null);};
+  const handleRename=id=>{if(!renameVal.trim())return;onRename(id,renameVal.trim());setRenaming(null);};
   const handleNew=()=>{if(!newName.trim())return;onNew(newName.trim());setNewName("");onClose();};
   if(!open)return null;
   return (
@@ -299,9 +303,10 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"14px 20px"}}>
           <Lbl>Saved ({index.length})</Lbl>
-          {index.length===0&&<div style={{color:P.muted,fontSize:13,fontStyle:"italic",textAlign:"center",padding:"20px 0"}}>No saved tournaments yet.</div>}
+          {tournamentsLoading&&<div style={{color:P.muted,fontSize:13,fontStyle:"italic"}}>Loading...</div>}
+          {!tournamentsLoading&&index.length===0&&<div style={{color:P.muted,fontSize:13,fontStyle:"italic",textAlign:"center",padding:"20px 0"}}>No saved tournaments yet.</div>}
           <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:8}}>
-            {[...index].sort((a,b)=>b.savedAt.localeCompare(a.savedAt)).map(entry=>{
+            {[...index].sort((a,b)=>b.updated_at?.localeCompare(a.updated_at||"")||0).map(entry=>{
               const isCurrent=entry.id===currentId;
               const isDeleting=confirmDelete===entry.id;
               const isRenaming=renaming===entry.id;
@@ -317,11 +322,12 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
                   ):(
                     <>
                       <div style={{marginBottom:6}}>
-                        <div style={{fontWeight:700,fontSize:13,color:isCurrent?P.accent:P.text}}>
-                          {entry.name}{isCurrent&&<span style={{fontSize:10,color:P.accent,marginLeft:6,fontWeight:400}}>● current</span>}
+                        <div style={{fontWeight:700,fontSize:13,color:isCurrent?P.accent:P.text,display:"flex",alignItems:"center",gap:6}}>
+                          {entry.name}
+                          {isCurrent&&<span style={{fontSize:10,color:P.accent,fontWeight:400}}>● current</span>}
+                          {entry.myRole==="editor"&&<span style={{fontSize:10,color:P.blue,background:P.blue+"22",borderRadius:10,padding:"1px 6px"}}>shared</span>}
                         </div>
-                        <div style={{color:P.muted,fontSize:11,marginTop:2}}>{entry.summary}</div>
-                        <div style={{color:P.muted,fontSize:10,marginTop:2}}>Saved {fmtSaved(entry.savedAt)}</div>
+                        <div style={{color:P.muted,fontSize:10,marginTop:2}}>Saved {entry.updated_at?fmtSaved(entry.updated_at):""}</div>
                       </div>
                       {isDeleting?(
                         <div>
@@ -335,7 +341,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
                         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                           {!isCurrent&&<Btn small onClick={()=>handleLoad(entry.id)}>📂 Load</Btn>}
                           <Btn small variant="secondary" onClick={()=>{setRenaming(entry.id);setRenameVal(entry.name);}}>✏️ Rename</Btn>
-                          <Btn small variant="danger" onClick={()=>setConfirmDelete(entry.id)}>🗑 Delete</Btn>
+                          {entry.myRole==="owner"&&<Btn small variant="danger" onClick={()=>setConfirmDelete(entry.id)}>🗑 Delete</Btn>}
                         </div>
                       )}
                     </>
@@ -351,7 +357,7 @@ function TournamentDrawer({open,onClose,currentId,currentName,onNew,onLoad,onSav
 }
 
 // ─── SCHEDULER ───────────────────────────────────────────────────────────────
-function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules}){
+function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions}){
 
   const warnings = [];
   const TARGET = targetGamesPerTeam||4;
@@ -418,6 +424,17 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     if(prev!==undefined){ const pp=slotTeams[prev]||new Set(); if(pp.has(home)||pp.has(away)) return false; }
     const linked = [...(linkedMap[home]||[]),...(linkedMap[away]||[])];
     if(linked.some(t=>playing.has(t))) return false;
+    // Team time restrictions: can't start a game during a blocked window
+    if(teamRestrictions){
+      const meta = slotMeta[sk];
+      if(meta){
+        for(const teamId of [home,away]){
+          for(const r of (teamRestrictions[teamId]||[])){
+            if(r.date===meta.date && meta.absTimeMins>=r.startMins && meta.absTimeMins<r.endMins) return false;
+          }
+        }
+      }
+    }
     return true;
   };
 
@@ -567,26 +584,257 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   return {slots:resultSlots, warnings, sortedDates};
 }
 
+// ─── AUTH SCREEN ─────────────────────────────────────────────────────────────
+function AuthScreen({ onAuth }) {
+  const [mode, setMode] = useState("signin"); // "signin" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+
+  const handle = async () => {
+    if (!email.trim() || !password.trim()) return;
+    setLoading(true); setError(null); setSuccess(null);
+    try {
+      const fn = mode === "signin" ? signIn : signUp;
+      const { data, error: err } = await fn(email.trim(), password);
+      if (err) { setError(err.message); return; }
+      if (mode === "signup") {
+        setSuccess("Account created! Check your email to confirm, then sign in.");
+        setMode("signin");
+      } else if (data?.user) {
+        await linkUserToInvites(data.user.id, data.user.email);
+        onAuth(data.user, data.session);
+      }
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", background:P.bg, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'Inter','Segoe UI',sans-serif" }}>
+      <div style={{ width:"100%", maxWidth:380, padding:24 }}>
+        <div style={{ textAlign:"center", marginBottom:32 }}>
+          <div style={{ fontSize:48, marginBottom:12 }}>🏆</div>
+          <div style={{ fontWeight:800, fontSize:22, color:P.accent }}>Tournament Scheduler</div>
+          <div style={{ color:P.muted, fontSize:14, marginTop:4 }}>Sign in to manage your tournaments</div>
+        </div>
+        <div style={{ background:P.surface, border:`1px solid ${P.border}`, borderRadius:12, padding:28 }}>
+          <div style={{ display:"flex", gap:8, marginBottom:24 }}>
+            {["signin","signup"].map(m => (
+              <button key={m} onClick={()=>setMode(m)} style={{
+                flex:1, padding:"9px 0", borderRadius:7, border:"none", cursor:"pointer",
+                fontFamily:"inherit", fontWeight:700, fontSize:14,
+                background: mode===m ? P.accent : P.bg,
+                color: mode===m ? "#0d1b2a" : P.muted,
+              }}>{m==="signin"?"Sign In":"Create Account"}</button>
+            ))}
+          </div>
+          <div style={{ marginBottom:14 }}>
+            <div style={{ color:P.muted, fontSize:12, marginBottom:6 }}>Email</div>
+            <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+              placeholder="you@example.com"
+              onKeyDown={e=>e.key==="Enter"&&handle()}
+              style={{ width:"100%", background:P.bg, border:`1px solid ${P.border}`, borderRadius:7,
+                color:P.text, padding:"9px 12px", fontFamily:"inherit", fontSize:14, outline:"none", boxSizing:"border-box" }}/>
+          </div>
+          <div style={{ marginBottom:20 }}>
+            <div style={{ color:P.muted, fontSize:12, marginBottom:6 }}>Password</div>
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+              placeholder="••••••••"
+              onKeyDown={e=>e.key==="Enter"&&handle()}
+              style={{ width:"100%", background:P.bg, border:`1px solid ${P.border}`, borderRadius:7,
+                color:P.text, padding:"9px 12px", fontFamily:"inherit", fontSize:14, outline:"none", boxSizing:"border-box" }}/>
+          </div>
+          {error && <div style={{ color:P.red, fontSize:13, marginBottom:14, background:P.red+"18", borderRadius:6, padding:"8px 12px" }}>{error}</div>}
+          {success && <div style={{ color:P.green, fontSize:13, marginBottom:14, background:P.green+"18", borderRadius:6, padding:"8px 12px" }}>{success}</div>}
+          <button onClick={handle} disabled={loading||!email||!password} style={{
+            width:"100%", padding:"11px 0", borderRadius:8, border:"none", cursor:loading?"wait":"pointer",
+            background:P.accent, color:"#0d1b2a", fontFamily:"inherit", fontWeight:700, fontSize:15,
+            opacity:(!email||!password)?0.5:1,
+          }}>{loading?"...":(mode==="signin"?"Sign In":"Create Account")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SHARE DRAWER ─────────────────────────────────────────────────────────────
+function ShareDrawer({ open, onClose, tournamentId, currentUserId }) {
+  const [members, setMembers] = useState([]);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (open && tournamentId) {
+      getMembers(tournamentId).then(setMembers);
+    }
+  }, [open, tournamentId]);
+
+  const handleInvite = async () => {
+    if (!inviteEmail.trim()) return;
+    setLoading(true); setError(null);
+    try {
+      await inviteMember(tournamentId, inviteEmail.trim());
+      setInviteEmail("");
+      const updated = await getMembers(tournamentId);
+      setMembers(updated);
+    } catch(e) {
+      setError(e.message.includes("unique") ? "That email is already invited." : e.message);
+    } finally { setLoading(false); }
+  };
+
+  const handleRemove = async (memberId) => {
+    await removeMember(memberId);
+    setMembers(m => m.filter(x => x.id !== memberId));
+  };
+
+  if (!open) return null;
+  return (
+    <>
+      <div onClick={onClose} style={{ position:"fixed", inset:0, background:"#00000066", zIndex:200 }}/>
+      <div style={{ position:"fixed", top:0, right:0, bottom:0, width:340, background:P.surface,
+        borderLeft:`1px solid ${P.border}`, zIndex:201, display:"flex", flexDirection:"column",
+        boxShadow:"-4px 0 24px #00000044" }}>
+        <div style={{ padding:"18px 20px", borderBottom:`1px solid ${P.border}`, display:"flex", alignItems:"center", gap:10 }}>
+          <span style={{ fontSize:20 }}>👥</span>
+          <span style={{ fontWeight:800, fontSize:16, color:P.accent, flex:1 }}>Share Tournament</span>
+          <span onClick={onClose} style={{ cursor:"pointer", color:P.muted, fontSize:18 }}>✕</span>
+        </div>
+
+        <div style={{ padding:"16px 20px", borderBottom:`1px solid ${P.border}` }}>
+          <div style={{ color:P.muted, fontSize:12, marginBottom:8 }}>Invite by email — they'll get editor access when they sign in.</div>
+          <div style={{ display:"flex", gap:8 }}>
+            <input value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)}
+              placeholder="email@example.com"
+              onKeyDown={e=>e.key==="Enter"&&handleInvite()}
+              style={{ flex:1, background:P.bg, border:`1px solid ${P.border}`, borderRadius:6,
+                color:P.text, padding:"7px 10px", fontFamily:"inherit", fontSize:13, outline:"none" }}/>
+            <button onClick={handleInvite} disabled={loading||!inviteEmail.trim()} style={{
+              background:P.accent, color:"#0d1b2a", border:"none", borderRadius:6,
+              padding:"7px 14px", cursor:"pointer", fontFamily:"inherit", fontWeight:700, fontSize:13,
+              opacity:!inviteEmail.trim()?0.5:1,
+            }}>{loading?"...":"Invite"}</button>
+          </div>
+          {error && <div style={{ color:P.red, fontSize:12, marginTop:8 }}>{error}</div>}
+        </div>
+
+        <div style={{ flex:1, overflowY:"auto", padding:"14px 20px" }}>
+          <div style={{ color:P.muted, fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:0.5, marginBottom:10 }}>
+            People with access ({members.length})
+          </div>
+          {members.length === 0 && (
+            <div style={{ color:P.muted, fontSize:13, fontStyle:"italic" }}>No one invited yet.</div>
+          )}
+          {members.map(m => (
+            <div key={m.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 0", borderBottom:`1px solid ${P.border}` }}>
+              <div style={{ width:32, height:32, borderRadius:"50%", background:P.surfaceLight,
+                display:"flex", alignItems:"center", justifyContent:"center", color:P.accent, fontWeight:700, fontSize:14 }}>
+                {m.email[0].toUpperCase()}
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, color:P.text, fontWeight:600 }}>{m.email}</div>
+                <div style={{ fontSize:11, color:P.muted }}>
+                  {m.user_id ? "✅ Active" : "⏳ Invite pending"} · {m.role}
+                </div>
+              </div>
+              {m.user_id !== currentUserId && (
+                <span onClick={()=>handleRemove(m.id)}
+                  style={{ cursor:"pointer", color:P.red, fontSize:12, padding:"3px 8px",
+                    border:`1px solid ${P.red}44`, borderRadius:5 }}>Remove</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App(){
+  // ── Auth state ────────────────────────────────────────────────────────────
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [shareOpen, setShareOpen] = useState(false);
+
+  useEffect(() => {
+    // Check existing session
+    sb.auth.getSession().then(({ data }) => {
+      if (data?.session?.user) {
+        setUser(data.session.user);
+        linkUserToInvites(data.session.user.id, data.session.user.email);
+      }
+      setAuthLoading(false);
+    });
+    // Listen for auth changes
+    const { data: { subscription } } = sb.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+      if (session?.user) linkUserToInvites(session.user.id, session.user.email);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (authLoading) return (
+    <div style={{ minHeight:"100vh", background:P.bg, display:"flex", alignItems:"center", justifyContent:"center", color:P.muted, fontFamily:"inherit" }}>
+      Loading...
+    </div>
+  );
+  if (!user) return <AuthScreen onAuth={(u) => setUser(u)} />;
+
+  return <AppInner user={user} onSignOut={async()=>{await signOut();setUser(null);}} shareOpen={shareOpen} setShareOpen={setShareOpen}/>;
+}
+
+function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const [tab,setTab]=useState("groups");
   const [drawerOpen,setDrawerOpen]=useState(false);
   const [tournamentId,setTournamentId]=useState(null);
   const [tournamentName,setTournamentName]=useState("");
   const [savedFlash,setSavedFlash]=useState(false);
+  const [saveError,setSaveError]=useState(null);
+  const [myTournaments,setMyTournaments]=useState([]);
+  const [tournamentsLoading,setTournamentsLoading]=useState(false);
+  const [liveEditors,setLiveEditors]=useState([]); // who else is viewing
+  const saveTimeout=useRef(null);
+
+  // Load tournament list on mount
+  useEffect(()=>{
+    if(!user)return;
+    setTournamentsLoading(true);
+    fetchMyTournaments(user.id).then(list=>{setMyTournaments(list||[]);setTournamentsLoading(false);});
+  },[user]);
+
+  // Real-time sync: subscribe to current tournament changes from other editors
+  useEffect(()=>{
+    if(!tournamentId)return;
+    const sub=subscribeTournament(tournamentId,remote=>{
+      // Only apply if the update came from someone else (updated_at changed)
+      if(remote?.data) applyState(deserializeState(remote.data));
+    });
+    // Presence: track who's viewing
+    const channel=sb.channel(`presence:${tournamentId}`);
+    channel.on("presence",{event:"sync"},()=>{
+      const state=channel.presenceState();
+      setLiveEditors(Object.values(state).flat().map(p=>p.email).filter(e=>e!==user.email));
+    }).subscribe(async status=>{
+      if(status==="SUBSCRIBED") await channel.track({email:user.email,ts:Date.now()});
+    });
+    return()=>{sb.removeChannel(sub);sb.removeChannel(channel);};
+  },[tournamentId]);
 
   // Saveable state
   const [groups,setGroups]=useState([]);
   const [teams,setTeams]=useState({});
   const [pinnedMatchups,setPinnedMatchups]=useState({});
-  const [mustPlayMatchups,setMustPlayMatchups]=useState(new Set()); // keys guaranteed to be scheduled
+  const [mustPlayMatchups,setMustPlayMatchups]=useState(new Set());
   const [excludedMatchups,setExcludedMatchups]=useState(new Set());
   const [courts,setCourts]=useState([{id:"c1",name:"Court 1",location:"",windows:[{id:"w1",date:todayStr(),open:"08:00",close:"17:00"}]}]);
   const [courtGroupPrimary,setCourtGroupPrimary]=useState({});
   const [gameDuration,setGameDuration]=useState(30);
   const [targetGamesPerTeam,setTargetGamesPerTeam]=useState(4);
   const [teamGameOverrides,setTeamGameOverrides]=useState({});
-  const [groupBlockRules,setGroupBlockRules]=useState({}); // { groupId: [blockedGroupId,...] }
+  const [groupBlockRules,setGroupBlockRules]=useState({});
+  const [teamRestrictions,setTeamRestrictions]=useState({});
   const [linkedGroups,setLinkedGroups]=useState([]);
 
   // UI-only state
@@ -597,20 +845,20 @@ export default function App(){
   const [linkSelections,setLinkSelections]=useState([]);
   const [schedule,setSchedule]=useState(null);
   const [scheduleWarnings,setScheduleWarnings]=useState([]);
-  const [dragGame,setDragGame]=useState(null);   // index into schedule array
-  const [dragOver,setDragOver]=useState(null);   // "slotKey-courtId"
-  const [dragError,setDragError]=useState(null); // error message
+  const [selectedGame,setSelectedGame]=useState(null);
+  const [dragOver,setDragOver]=useState(null);
+  const [dragError,setDragError]=useState(null);
 
   const currentState=useCallback(()=>({
-    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,
-    pinnedMatchups,mustPlayMatchups:[...mustPlayMatchups],excludedMatchups,
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,linkedGroups,pinnedMatchups,mustPlayMatchups,excludedMatchups]);
+    groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,
+    pinnedMatchups,mustPlayMatchups:[...mustPlayMatchups],excludedMatchups:[...excludedMatchups],
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,pinnedMatchups,mustPlayMatchups,excludedMatchups]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
     setCourts(st.courts||[]);setCourtGroupPrimary(st.courtGroupPrimary||{});
     setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);
-    setTeamGameOverrides(st.teamGameOverrides||{});setGroupBlockRules(st.groupBlockRules||{});
+    setTeamGameOverrides(st.teamGameOverrides||{});setGroupBlockRules(st.groupBlockRules||{});setTeamRestrictions(st.teamRestrictions||{});
     setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
     setMustPlayMatchups(new Set(st.mustPlayMatchups||[]));
@@ -618,18 +866,63 @@ export default function App(){
     setSchedule(null);setScheduleWarnings([]);setTab("groups");
   };
 
-  const handleSave=useCallback(()=>{
-    const id=tournamentId||("t"+uid());
-    const name=tournamentName||"Untitled Tournament";
-    saveTournament(id,name,currentState());
-    setTournamentId(id);setTournamentName(name);
-    setSavedFlash(true);setTimeout(()=>setSavedFlash(false),2000);
-  },[tournamentId,tournamentName,currentState]);
+  // Save to Supabase (debounced auto-save + manual save)
+  const doSave=useCallback(async(state,id,name)=>{
+    setSaveError(null);
+    try{
+      const serialized={...state,excludedMatchups:[...state.excludedMatchups],mustPlayMatchups:[...state.mustPlayMatchups]};
+      const result=await saveTournamentToDB(id||null,name||"Untitled Tournament",serialized,user.id);
+      if(!id){
+        setTournamentId(result.id);
+        setMyTournaments(prev=>[{id:result.id,name:result.name,myRole:"owner",updated_at:new Date().toISOString()},...prev]);
+      } else {
+        setMyTournaments(prev=>prev.map(t=>t.id===id?{...t,name,updated_at:new Date().toISOString()}:t));
+      }
+      return result.id;
+    }catch(e){setSaveError(e.message);return null;}
+  },[user]);
 
-  const handleLoad=id=>{const st=loadTournament(id);if(!st)return;const idx=loadIndex();const entry=idx.find(x=>x.id===id);setTournamentId(id);setTournamentName(entry?.name||"");applyState(st);};
-  const handleNew=name=>{const id="t"+uid();const st=blankState();saveTournament(id,name,st);setTournamentId(id);setTournamentName(name);applyState(st);};
-  const handleRename=(id,name)=>{const st=loadTournament(id);if(st)saveTournament(id,name,st);if(id===tournamentId)setTournamentName(name);};
-  const handleDelete=id=>{deleteTournament(id);if(id===tournamentId){setTournamentId(null);setTournamentName("");applyState(blankState());}};
+  const handleSave=useCallback(async()=>{
+    const id=await doSave(currentState(),tournamentId,tournamentName||"Untitled Tournament");
+    if(id){setTournamentId(id);setSavedFlash(true);setTimeout(()=>setSavedFlash(false),2000);}
+  },[tournamentId,tournamentName,currentState,doSave]);
+
+  // Auto-save 3s after any state change when a tournament is loaded
+  const autoSaveState=currentState();
+  useEffect(()=>{
+    if(!tournamentId)return;
+    if(saveTimeout.current)clearTimeout(saveTimeout.current);
+    saveTimeout.current=setTimeout(()=>doSave(autoSaveState,tournamentId,tournamentName),3000);
+    return()=>clearTimeout(saveTimeout.current);
+  },[autoSaveState,tournamentId]);
+
+  const handleLoad=async(id)=>{
+    const row=await loadTournamentFromDB(id);
+    if(!row)return;
+    setTournamentId(row.id);setTournamentName(row.name);
+    applyState(deserializeState(row.data));
+  };
+  const handleNew=async(name)=>{
+    const st=blankState();
+    const serialized={...serializeState(st),excludedMatchups:[],mustPlayMatchups:[]};
+    const result=await saveTournamentToDB(null,name,serialized,user.id);
+    if(result){
+      setTournamentId(result.id);setTournamentName(name);
+      setMyTournaments(prev=>[{id:result.id,name,myRole:"owner",updated_at:new Date().toISOString()},...prev]);
+      applyState(st);
+    }
+  };
+  const handleRename=async(id,name)=>{
+    const row=await loadTournamentFromDB(id);
+    if(row)await saveTournamentToDB(id,name,row.data,user.id);
+    if(id===tournamentId)setTournamentName(name);
+    setMyTournaments(prev=>prev.map(t=>t.id===id?{...t,name}:t));
+  };
+  const handleDelete=async(id)=>{
+    await deleteTournamentFromDB(id);
+    setMyTournaments(prev=>prev.filter(t=>t.id!==id));
+    if(id===tournamentId){setTournamentId(null);setTournamentName("");applyState(blankState());}
+  };;
 
   // Groups & Teams
   const addGroup=()=>{if(!newGroupName.trim())return;const id="g"+uid();setGroups(g=>[...g,{id,name:newGroupName.trim(),teams:[]}]);setNewGroupName("");};
@@ -688,7 +981,7 @@ export default function App(){
   // Schedule
   const buildSchedule=()=>{
     try{
-      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules});
+      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions});
       setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
     }catch(err){
       setSchedule([]);setScheduleWarnings([`Scheduler error: ${err.message}`]);setTab("schedule");
@@ -728,6 +1021,7 @@ export default function App(){
     {id:"courts",label:"🏟 Courts & Times"},
     {id:"settings",label:"⚙️ Settings"},
     {id:"links",label:"🔗 Linked Teams"},
+    {id:"restrict",label:"🚫 Restrictions"},
     {id:"schedule",label:"📅 Schedule",hi:!!schedule},
   ];
 
@@ -736,8 +1030,12 @@ export default function App(){
 
       <TournamentDrawer open={drawerOpen} onClose={()=>setDrawerOpen(false)}
         currentId={tournamentId} currentName={tournamentName}
+        myTournaments={myTournaments} tournamentsLoading={tournamentsLoading}
         onNew={handleNew} onLoad={handleLoad} onSave={handleSave}
         onRename={handleRename} onDelete={handleDelete}/>
+
+      <ShareDrawer open={shareOpen} onClose={()=>setShareOpen(false)}
+        tournamentId={tournamentId} currentUserId={user.id}/>
 
       {/* Header */}
       <div style={{background:P.surface,borderBottom:`1px solid ${P.border}`,padding:"13px 22px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -745,21 +1043,31 @@ export default function App(){
           <span style={{fontSize:16}}>📋</span>
           <div style={{textAlign:"left"}}>
             <div style={{fontWeight:700,fontSize:13,color:tournamentName?P.accent:P.muted}}>{tournamentName||"New Tournament"}</div>
-            <div style={{fontSize:10,color:P.muted}}>{loadIndex().length} saved</div>
+            <div style={{fontSize:10,color:P.muted}}>{myTournaments.length} saved</div>
           </div>
           <span style={{color:P.muted,fontSize:11,marginLeft:2}}>▼</span>
         </button>
         <input value={tournamentName} onChange={e=>setTournamentName(e.target.value)} placeholder="Tournament name…"
           style={{background:"transparent",border:"none",borderBottom:`1px solid ${P.border}`,color:P.text,fontWeight:600,fontSize:15,fontFamily:"inherit",outline:"none",width:220,padding:"2px 4px"}}/>
         <div style={{color:P.muted,fontSize:12,flex:1}}>
-          {totalGames} games · {pinnedCount} pinned · {excludedCount} excluded · {courts.length} courts
+          {totalGames} games · {courts.length} courts
+          {liveEditors.length>0&&<span style={{color:P.green,marginLeft:8}}>● {liveEditors.length} also editing</span>}
         </div>
+        {saveError&&<span style={{color:P.red,fontSize:12}}>⚠️ {saveError}</span>}
+        {tournamentId&&(
+          <Btn onClick={()=>setShareOpen(true)} variant="secondary" style={{whiteSpace:"nowrap"}}>
+            👥 Share
+          </Btn>
+        )}
         <Btn onClick={handleSave} variant={savedFlash?"success":"secondary"} style={{whiteSpace:"nowrap"}}>
           {savedFlash?"✅ Saved!":"💾 Save"}
         </Btn>
         <Btn onClick={buildSchedule} disabled={allTeams.length<2||courts.length===0||totalGames===0} style={{whiteSpace:"nowrap"}}>
           ⚡ Generate
         </Btn>
+        <button onClick={onSignOut} title={`Signed in as ${user.email}`} style={{background:"transparent",border:`1px solid ${P.border}`,borderRadius:6,padding:"6px 10px",cursor:"pointer",color:P.muted,fontFamily:"inherit",fontSize:12}}>
+          {user.email.split("@")[0]} ↩
+        </button>
       </div>
 
       {/* Tabs */}
@@ -1153,6 +1461,86 @@ export default function App(){
           </div>
         )}
 
+        {/* ══ RESTRICTIONS ═════════════════════════════════════════════════ */}
+        {tab==="restrict"&&(
+          <div>
+            <SecHead title="Team Time Restrictions"
+              sub="Block specific teams from playing during certain time windows. The scheduler will skip those slots for that team."/>
+
+            {allTeams.length===0&&<Card style={{textAlign:"center",color:P.muted,padding:40}}>Add teams first.</Card>}
+
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              {groups.map(group=>(
+                <Card key={group.id}>
+                  <div style={{color:P.accent,fontWeight:700,fontSize:14,marginBottom:12}}>{group.name}</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                    {group.teams.map(tid=>{
+                      const team=teams[tid]; if(!team) return null;
+                      const restrictions=teamRestrictions[tid]||[];
+                      return (
+                        <div key={tid} style={{background:restrictions.length>0?team.color+"12":P.bg,border:`1px solid ${restrictions.length>0?team.color+"44":P.border}`,borderRadius:8,padding:"10px 14px"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:restrictions.length>0?10:0}}>
+                            <div style={{width:10,height:10,borderRadius:"50%",background:team.color,flexShrink:0}}/>
+                            <span style={{fontWeight:700,fontSize:13,color:team.color,flex:1}}>{team.name}</span>
+                            <Btn small variant="ghost" onClick={()=>{
+                              // Add a new restriction with defaults
+                              const allDates=[...new Set(courts.flatMap(c=>(c.windows||[]).map(w=>w.date).filter(Boolean)))].sort();
+                              const defaultDate=allDates[0]||todayStr();
+                              setTeamRestrictions(r=>({...r,[tid]:[...(r[tid]||[]),{id:uid(),date:defaultDate,startMins:timeMins("14:00"),endMins:timeMins("16:00")}]}));
+                            }}>+ Add Restriction</Btn>
+                          </div>
+                          {restrictions.map((r,ri)=>(
+                            <div key={r.id} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",background:P.bg,border:`1px solid ${P.border}`,borderRadius:7,padding:"8px 11px",marginBottom:ri<restrictions.length-1?6:0}}>
+                              <span style={{color:P.muted,fontSize:12,minWidth:60}}>Can't play</span>
+                              <input type="date" value={r.date||""}
+                                onChange={e=>setTeamRestrictions(tr=>({...tr,[tid]:tr[tid].map((x,i)=>i===ri?{...x,date:e.target.value}:x)}))}
+                                style={{background:"transparent",border:"none",color:P.blue,fontWeight:700,fontSize:12,fontFamily:"inherit",outline:"none",cursor:"pointer"}}/>
+                              <span style={{color:P.muted,fontSize:12}}>from</span>
+                              <input type="time" value={fmtMinsToTime(r.startMins)}
+                                onChange={e=>setTeamRestrictions(tr=>({...tr,[tid]:tr[tid].map((x,i)=>i===ri?{...x,startMins:timeMins(e.target.value)}:x)}))}
+                                style={{background:"transparent",border:"none",color:P.green,fontWeight:700,fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+                              <span style={{color:P.muted,fontSize:12}}>to</span>
+                              <input type="time" value={fmtMinsToTime(r.endMins)}
+                                onChange={e=>setTeamRestrictions(tr=>({...tr,[tid]:tr[tid].map((x,i)=>i===ri?{...x,endMins:timeMins(e.target.value)}:x)}))}
+                                style={{background:"transparent",border:"none",color:P.red,fontWeight:700,fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+                              <span onClick={()=>setTeamRestrictions(tr=>({...tr,[tid]:tr[tid].filter((_,i)=>i!==ri)}))}
+                                style={{marginLeft:"auto",cursor:"pointer",color:P.muted,fontSize:12}}>✕</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            {/* Summary of all active restrictions */}
+            {Object.keys(teamRestrictions).some(tid=>(teamRestrictions[tid]||[]).length>0)&&(
+              <Card style={{marginTop:16,background:P.bg}}>
+                <Lbl>Active Restrictions</Lbl>
+                <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:6}}>
+                  {Object.entries(teamRestrictions).map(([tid,rs])=>{
+                    const team=teams[tid]; if(!team||!rs.length) return null;
+                    return rs.map((r,i)=>(
+                      <div key={r.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderTop:i>0?`1px solid ${P.border}`:"none"}}>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:team.color,flexShrink:0}}/>
+                        <span style={{color:team.color,fontWeight:600,fontSize:13}}>{team.name}</span>
+                        <span style={{color:P.muted,fontSize:12}}>can't play on</span>
+                        <span style={{color:P.blue,fontWeight:600,fontSize:12}}>{fmtDate(r.date)}</span>
+                        <span style={{color:P.muted,fontSize:12}}>from</span>
+                        <span style={{color:P.green,fontWeight:600,fontSize:12}}>{fmtTime(r.startMins)}</span>
+                        <span style={{color:P.muted,fontSize:12}}>–</span>
+                        <span style={{color:P.red,fontWeight:600,fontSize:12}}>{fmtTime(r.endMins)}</span>
+                      </div>
+                    ));
+                  })}
+                </div>
+              </Card>
+            )}
+          </div>
+        )}
+
         {/* ══ SCHEDULE ══════════════════════════════════════════════════════ */}
         {tab==="schedule"&&(
           <div>
@@ -1175,93 +1563,122 @@ export default function App(){
                     <span onClick={()=>setDragError(null)} style={{cursor:"pointer",marginLeft:12,fontWeight:700}}>✕</span>
                   </div>
                 )}
-                <div style={{color:P.muted,fontSize:12,marginBottom:12}}>
-                  💡 Drag a game to another court or time slot to move it. Drag onto an occupied slot to swap.
+                <div style={{
+                  background:selectedGame!==null?P.accent+"18":P.surfaceLight,
+                  border:`1px solid ${selectedGame!==null?P.accent+"66":P.border}`,
+                  borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,
+                  display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
+                }}>
+                  {selectedGame!==null?(()=>{
+                    const g=schedule[selectedGame];
+                    const h=teams[g.match.home],a=teams[g.match.away];
+                    return <>
+                      <span style={{color:P.accent,fontWeight:700}}>✓ Selected:</span>
+                      <span style={{color:h?.color,fontWeight:700}}>{h?.name}</span>
+                      <span style={{color:P.muted}}>vs</span>
+                      <span style={{color:a?.color,fontWeight:700}}>{a?.name}</span>
+                      <span style={{color:P.muted,fontSize:12}}>— tap any slot to move or swap</span>
+                      <Btn small variant="ghost" style={{marginLeft:"auto"}} onClick={()=>setSelectedGame(null)}>Cancel</Btn>
+                    </>;
+                  })():<span style={{color:P.muted}}>🖱️ Drag a game to move it — or tap to select, then tap a slot to place. Back-to-back rules enforced.</span>}
                 </div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:16}}>
                   {allTeams.map(t=><Tag key={t.id} label={t.name} color={t.color}/>)}
                 </div>
                 {scheduleDatesSorted.map(date=>{
                   const daySlots=scheduleByDate[date]||[];
-                  const slotKeys=[...new Set(daySlots.map(s=>s.slotKey))].sort((a,b)=>a-b);
+                  // Show all available time slots for this date (occupied + open courts)
+                  const allSlotTimes=[...new Set([
+                    ...schedule.filter(s=>s.date===date).map(s=>s.absTimeMins),
+                    ...courts.flatMap(c=>(c.windows||[]).filter(w=>w.date===date).flatMap(w=>{
+                      const slots=[];let cur=timeMins(w.open);const cl=timeMins(w.close);
+                      while(cur<=cl){slots.push(cur);cur+=gameDuration;}return slots;
+                    }))
+                  ])].sort((a,b)=>a-b);
                   return (
                     <div key={date} style={{marginBottom:28}}>
                       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
                         <div style={{background:P.blue+"22",border:`1px solid ${P.blue}44`,borderRadius:8,padding:"6px 14px",color:P.blue,fontWeight:800,fontSize:15}}>📅 {fmtDate(date)}</div>
-                        <div style={{color:P.muted,fontSize:12}}>{daySlots.length} game{daySlots.length!==1?"s":""} · {daySlots.filter(s=>s.isPinned).length} pinned</div>
+                        <div style={{color:P.muted,fontSize:12}}>{daySlots.length} game{daySlots.length!==1?"s":""}</div>
                         <div style={{flex:1,height:1,background:P.border}}/>
                       </div>
                       <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                        {slotKeys.map(sk=>{
-                          const skGames=daySlots.filter(s=>s.slotKey===sk);
-                          const slotTime=skGames[0]?.absTimeMins??0;
+                        {allSlotTimes.map(slotTime=>{
+                          const slotGames=schedule.filter(s=>s.date===date&&s.absTimeMins===slotTime);
                           return (
-                            <div key={sk} style={{display:"flex",alignItems:"stretch"}}>
+                            <div key={slotTime} style={{display:"flex",alignItems:"stretch"}}>
                               <div style={{width:86,minWidth:86,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:P.surfaceLight,border:`1px solid ${P.border}`,borderRight:"none",borderRadius:"8px 0 0 8px",padding:"8px 4px"}}>
-                                <div style={{color:P.accent,fontWeight:700,fontSize:12,textAlign:"center"}}>{skGames[0]?.timeLabel||fmtTime(slotTime)}</div>
+                                <div style={{color:P.accent,fontWeight:700,fontSize:12,textAlign:"center"}}>{fmtTime(slotTime)}</div>
                                 <div style={{color:P.muted,fontSize:10}}>{gameDuration}min</div>
                               </div>
                               <div style={{flex:1,display:"grid",gridTemplateColumns:`repeat(${courts.length},1fr)`,border:`1px solid ${P.border}`,borderRadius:"0 8px 8px 0",overflow:"hidden"}}>
                                 {courts.map((court,ci)=>{
-                                  const game=skGames.find(s=>s.courtId===court.id);
+                                  const game=slotGames.find(s=>s.courtId===court.id);
                                   const home=game?teams[game.match.home]:null;
                                   const away=game?teams[game.match.away]:null;
                                   const grp=game?groups.find(g=>g.id===game.match.groupId):null;
                                   const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=slotTime&&slotTime<=timeMins(w.close));
                                   const closed=!courtOpen&&!game?.isPinned;
                                   const gameIdx=game?schedule.indexOf(game):-1;
-                                  const isDragging=dragGame!==null&&dragGame===gameIdx;
-                                  const isDropTarget=dragGame!==null&&!closed;
+                                  const isSelected=selectedGame!==null&&gameIdx===selectedGame;
+                                  const isTarget=selectedGame!==null&&!closed&&gameIdx!==selectedGame;
+                                  const doMoveOrSwap=(srcIdx,dstGame)=>{
+                                    const src=schedule[srcIdx];
+                                    const newSchedule=[...schedule];
+                                    const dIdx=scheduleDatesSorted.indexOf(date);
+                                    const targetSk=dIdx*100000+slotTime;
+                                    if(dstGame){
+                                      const dstIdx=schedule.indexOf(dstGame);
+                                      newSchedule[srcIdx]={...src,slotKey:dstGame.slotKey,date:dstGame.date,dayIdx:dstGame.dayIdx,absTimeMins:dstGame.absTimeMins,timeLabel:dstGame.timeLabel,courtId:dstGame.courtId};
+                                      newSchedule[dstIdx]={...dstGame,slotKey:src.slotKey,date:src.date,dayIdx:src.dayIdx,absTimeMins:src.absTimeMins,timeLabel:src.timeLabel,courtId:src.courtId};
+                                    } else {
+                                      newSchedule[srcIdx]={...src,slotKey:targetSk,date,dayIdx:dIdx,absTimeMins:slotTime,timeLabel:fmtTime(slotTime),courtId:court.id};
+                                    }
+                                    const affected=new Set([src.match.home,src.match.away,...(dstGame?[dstGame.match.home,dstGame.match.away]:[])]);
+                                    const conflict=validateNoBackToBack(newSchedule,[...affected],gameDuration);
+                                    if(conflict){setDragError(`⚠️ Back-to-back conflict: ${conflict}`);}
+                                    else{setSchedule(newSchedule);setDragError(null);}
+                                  };
+
+                                  const handleTap=()=>{
+                                    if(closed)return;
+                                    if(selectedGame===null){
+                                      if(game)setSelectedGame(gameIdx);
+                                    } else {
+                                      if(gameIdx===selectedGame){setSelectedGame(null);return;}
+                                      doMoveOrSwap(selectedGame,game);
+                                      setSelectedGame(null);
+                                    }
+                                  };
 
                                   return (
                                     <div key={court.id}
+                                      onClick={handleTap}
                                       draggable={!!game&&!closed}
-                                      onDragStart={game?e=>{
+                                      onDragStart={game&&!closed?e=>{
                                         e.dataTransfer.effectAllowed="move";
-                                        setDragGame(gameIdx);
+                                        e.dataTransfer.setData("gameIdx",String(gameIdx));
+                                        setSelectedGame(null);
                                         setDragError(null);
                                       }:undefined}
-                                      onDragOver={isDropTarget?e=>{e.preventDefault();e.dataTransfer.dropEffect="move";setDragOver(`${sk}-${court.id}`);}:undefined}
-                                      onDragLeave={()=>setDragOver(null)}
-                                      onDrop={isDropTarget?e=>{
+                                      onDragOver={!closed?e=>{e.preventDefault();e.dataTransfer.dropEffect="move";setDragOver(`${slotTime}-${court.id}`);}:undefined}
+                                      onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget))setDragOver(null);}}
+                                      onDrop={!closed?e=>{
                                         e.preventDefault();
                                         setDragOver(null);
-                                        if(dragGame===null||dragGame===gameIdx) return;
-                                        // Attempt move/swap
-                                        const src=schedule[dragGame];
-                                        const dst=game; // may be null (empty slot)
-                                        const newSchedule=[...schedule];
-                                        // Build what the new schedule looks like
-                                        if(dst){
-                                          // Swap: src goes to dst's slot/court, dst goes to src's slot/court
-                                          newSchedule[dragGame]={...src,slotKey:dst.slotKey,date:dst.date,dayIdx:dst.dayIdx,absTimeMins:dst.absTimeMins,timeLabel:dst.timeLabel,courtId:dst.courtId};
-                                          const dstIdx=schedule.indexOf(dst);
-                                          newSchedule[dstIdx]={...dst,slotKey:src.slotKey,date:src.date,dayIdx:src.dayIdx,absTimeMins:src.absTimeMins,timeLabel:src.timeLabel,courtId:src.courtId};
-                                        } else {
-                                          // Move to empty slot — compute dayIdx from date
-                                          const dIdx=scheduleDatesSorted.indexOf(date);
-                                          newSchedule[dragGame]={...src,slotKey:sk,date,dayIdx:dIdx,absTimeMins:slotTime,timeLabel:fmtTime(slotTime),courtId:court.id};
-                                        }
-                                        // Validate back-to-back for affected teams
-                                        const affectedTeams=new Set([src.match.home,src.match.away,...(dst?[dst.match.home,dst.match.away]:[])]);
-                                        const conflict=validateNoBackToBack(newSchedule,[...affectedTeams],gameDuration);
-                                        if(conflict){
-                                          setDragError(`⚠️ Back-to-back conflict: ${conflict}`);
-                                        } else {
-                                          setSchedule(newSchedule);
-                                          setDragError(null);
-                                        }
-                                        setDragGame(null);
+                                        const srcIdx=parseInt(e.dataTransfer.getData("gameIdx"));
+                                        if(isNaN(srcIdx)||srcIdx===gameIdx)return;
+                                        doMoveOrSwap(srcIdx,game);
                                       }:undefined}
-                                      onDragEnd={()=>{setDragGame(null);setDragOver(null);}}
+                                      onDragEnd={()=>setDragOver(null)}
                                       style={{
-                                        background:isDragging?"#ffffff18":dragOver===`${sk}-${court.id}`?P.accent+"22":closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
+                                        background:dragOver===`${slotTime}-${court.id}`?P.accent+"22":isSelected?P.accent+"33":isTarget&&game?P.purple+"22":isTarget?P.accent+"12":closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
                                         borderLeft:ci>0?`1px solid ${P.border}`:"none",
                                         padding:"8px 11px",minHeight:60,display:"flex",flexDirection:"column",justifyContent:"center",
-                                        opacity:isDragging?0.4:closed?0.45:1,
-                                        cursor:game&&!closed?"grab":"default",
-                                        outline:dragOver===`${sk}-${court.id}`?`2px solid ${P.accent}`:"none",
-                                        transition:"background .1s,outline .1s",
+                                        opacity:closed?0.45:1,
+                                        cursor:closed?"default":game?"grab":"default",
+                                        outline:dragOver===`${slotTime}-${court.id}`?`2px solid ${P.accent}`:isSelected?`2px solid ${P.accent}`:isTarget?`1px dashed ${P.accent}77`:"none",
+                                        transition:"background .1s",userSelect:"none",WebkitUserSelect:"none",
                                       }}>
                                       <div style={{color:P.muted,fontSize:10,marginBottom:4,fontWeight:600}}>{court.name}{court.location?` · ${court.location}`:""}</div>
                                       {closed?<div style={{color:P.border,fontSize:11,fontStyle:"italic"}}>— closed —</div>
@@ -1277,7 +1694,9 @@ export default function App(){
                                             {game.isMustPlay&&!game.isPinned&&<span style={{fontSize:10,color:P.purple,background:P.purple+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.purple}44`}}>🎯 must play</span>}
                                             {game.isPrimary&&!game.isPinned&&!game.isMustPlay&&<span style={{fontSize:10,color:P.accent,background:P.accent+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.accent}44`}}>★ primary</span>}
                                           </div>
-                                        </div>:<div style={{color:isDropTarget?P.accent+"88":P.border,fontSize:11,fontStyle:"italic"}}>{isDropTarget?"drop here":"— open —"}</div>}
+                                        </div>
+                                        :isTarget?<div style={{color:P.accent+"88",fontSize:11,fontStyle:"italic"}}>tap to place here</div>
+                                        :<div style={{color:P.border,fontSize:11,fontStyle:"italic"}}>— open —</div>}
                                     </div>
                                   );
                                 })}

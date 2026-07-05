@@ -361,7 +361,11 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
 
   const warnings = [];
   const TARGET = targetGamesPerTeam||4;
-  const teamCap = (id) => (teamGameOverrides&&teamGameOverrides[id]) ? teamGameOverrides[id] : TARGET;
+  const teamCap = (id) => {
+    const override = teamGameOverrides&&teamGameOverrides[id];
+    // Only apply override if it's explicitly set AND greater than TARGET
+    return (override && override > TARGET) ? override : TARGET;
+  };
 
   // ── Slot map ────────────────────────────────────────────────────────────────
   const dateSet = new Set();
@@ -583,9 +587,12 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   // ── Report ──────────────────────────────────────────────────────────────────
-  const under = allTeamIds.filter(id=>(teamCount[id]||0)<teamCap(id));
+  const under = allTeamIds.filter(id=>(teamCount[id]||0)<TARGET);
+  const over  = allTeamIds.filter(id=>(teamCount[id]||0)>TARGET);
   if(under.length>0)
     warnings.push(`${under.length} team(s) have fewer than ${TARGET} games: ${under.map(id=>teams[id]?.name||id).join(", ")}`);
+  if(over.length>0)
+    warnings.push(`${over.length} team(s) have more than ${TARGET} games: ${over.map(id=>`${teams[id]?.name||id}(${teamCount[id]})`).join(", ")}`);
 
   return {slots:resultSlots, warnings, sortedDates};
 }

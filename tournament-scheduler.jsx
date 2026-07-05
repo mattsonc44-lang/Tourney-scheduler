@@ -562,18 +562,19 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       }).sort((a,b) => (teamCount[a]||0)-(teamCount[b]||0));
 
       const allOpps = [...needsGame, ...overflowOpps];
+      // Safety: never play a pair twice
+      const validOpps = allOpps.filter(id => !playedPairs.has(matchKey(home,id)));
 
-      for(const away of allOpps){
+      for(const away of validOpps){
         const gid = homeGroup?.id || groups[0]?.id;
         const found = findSlot(home, away, gid);
         if(found){
           place(found.sk, found.court.id, home, away, gid, false,
             (courtGroupPrimary[found.court.id]||[]).includes(gid));
           progress = true;
-          break; // restart outer while loop with fresh counts
+          break;
         }
       }
-      if(progress) break; // restart from top of needy list with fresh counts
     }
   }
 

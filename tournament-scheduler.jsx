@@ -464,9 +464,8 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   // ── STEP 2: Fair distribution scheduler ──
-  // Problem: sorting by urgency alone lets large groups (more pairs = more urgency)
-  // starve small groups entirely. Fix: interleave groups — schedule one game per
-  // group per round before any group gets a second game in that round.
+  // Simple approach: flatten all matches, sort by urgency, find earliest slot for each.
+  // Any game can go any time — no group isolation needed.
   const TARGET = targetGamesPerTeam||4;
   const teamGameCount = {};
 
@@ -501,53 +500,67 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     return null;
   };
 
-  // Build per-group match pools
-  const groupMatchPool = {};
-  for(const group of groups) groupMatchPool[group.id] = [];
-  for(const m of freeMatches){
-    if(groupMatchPool[m.groupId]) groupMatchPool[m.groupId].push(m);
-  }
-
-  // Sort each group's pool: most-under-target pairs first
-  const sortPool = (pool) => pool.sort((a,b)=>{
-    const aU = Math.max(0,teamNeeds(a.home)) + Math.max(0,teamNeeds(a.away));
-    const bU = Math.max(0,teamNeeds(b.home)) + Math.max(0,teamNeeds(b.away));
-    return bU - aU;
-  });
-
-  // Remove matches where both teams are at/over cap
-  const prunePool = (pool) => {
-    for(let i=pool.length-1;i>=0;i--){
-      if(teamNeeds(pool[i].home)<=0 && teamNeeds(pool[i].away)<=0) pool.splice(i,1);
+  // Assign each match a group-round number so we interleave fairly:
+  // Group A game 1, Group B game 1, Group C game 1, Group D game 1,
+  // Group A game 2, Group B game 2, ... etc.
+  // Within each group, pairs are ordered so each team plays evenly.
+  const buildInterleaved = () => {
+    // Build per-group pair lists, round-robin ordered so each team plays evenly
+    const perGroup = {};
+    for(const group of groups) perGroup[group.id] = [];
+    for(const m of freeMatches){
+      if(perGroup[m.groupId]) perGroup[m.groupId].push(m);
     }
+    // Interleave: take one from each group in turn
+    const result = [];
+    let maxLen = Math.max(...Object.values(perGroup).map(a=>a.length));
+    for(let i=0; i<maxLen; i++){
+      for(const group of groups){
+        const pool = perGroup[group.id];
+        if(i < pool.length) result.push(pool[i]);
+      }
+    }
+    return result;
   };
 
-  // Interleaved scheduling: one game per group per pass
-  let anyPlaced = true;
-  while(anyPlaced){
-    anyPlaced = false;
-    for(const group of groups){
-      const pool = groupMatchPool[group.id];
-      prunePool(pool);
-      sortPool(pool);
-      // Try to place one game for this group this pass
-      let placed = false;
-      for(let i=0;i<pool.length;i++){
-        const match = pool[i];
-        if(teamNeeds(match.home)<=0 && teamNeeds(match.away)<=0){ pool.splice(i,1); i--; continue; }
-        const found = findEarliestSlot(match);
-        if(found){
-          pool.splice(i,1);
-          placeGameFair(found.slotKey, found.court.id, match, courtPrimary[found.court.id].includes(match.groupId));
-          anyPlaced = true;
-          placed = true;
-          break;
-        }
+  const interleaved = buildInterleaved();
+
+  // Schedule pass: try every match in interleaved order.
+  // Keep looping until no more progress.
+  const pending = [...interleaved];
+  let progress = true;
+  while(progress && pending.length > 0){
+    progress = false;
+    // Re-sort: within the pending list, most-needed pairs first
+    // but preserve rough interleave by using group index as tiebreak
+    const groupIdx = {};
+    groups.forEach((g,i) => groupIdx[g.id] = i);
+    pending.sort((a,b) => {
+      const aN = Math.max(0,teamNeeds(a.home)) + Math.max(0,teamNeeds(a.away));
+      const bN = Math.max(0,teamNeeds(b.home)) + Math.max(0,teamNeeds(b.away));
+      if(bN !== aN) return bN - aN;
+      return groupIdx[a.groupId] - groupIdx[b.groupId];
+    });
+
+    let i = 0;
+    while(i < pending.length){
+      const match = pending[i];
+      // Drop if both teams are done
+      if(teamNeeds(match.home) <= 0 && teamNeeds(match.away) <= 0){
+        pending.splice(i, 1); continue;
+      }
+      const found = findEarliestSlot(match);
+      if(found){
+        pending.splice(i, 1);
+        placeGameFair(found.slotKey, found.court.id, match, courtPrimary[found.court.id].includes(match.groupId));
+        progress = true;
+      } else {
+        i++;
       }
     }
   }
 
-  // Cross-group mop-up: teams still under target get games vs other groups
+  // Cross-group mop-up: fill remaining games for under-target teams
   const underTeams = Object.values(teams).filter(t => teamNeeds(t.id) > 0);
   if(underTeams.length >= 2){
     const crossMatches = [];
@@ -563,9 +576,8 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       }
     }
     crossMatches.sort((a,b)=>{
-      const aU=Math.max(0,teamNeeds(a.home))+Math.max(0,teamNeeds(a.away));
-      const bU=Math.max(0,teamNeeds(b.home))+Math.max(0,teamNeeds(b.away));
-      return bU-aU;
+      return (Math.max(0,teamNeeds(b.home))+Math.max(0,teamNeeds(b.away))) -
+             (Math.max(0,teamNeeds(a.home))+Math.max(0,teamNeeds(a.away)));
     });
     for(const match of crossMatches){
       if(teamNeeds(match.home)<=0 && teamNeeds(match.away)<=0) continue;

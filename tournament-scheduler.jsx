@@ -589,8 +589,8 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
 
 
 
-  if(unscheduled.length>0)
-    warnings.push(`${unscheduled.length} game(s) could not be scheduled — check court availability windows or linked-team constraints.`);
+  if(pending.length>0)
+    warnings.push(`${pending.length} game(s) could not be scheduled — check court availability windows or linked-team constraints.`);
 
   return{slots:resultSlots,warnings,sortedDates};
 }

@@ -939,10 +939,46 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
 
   // Groups & Teams
   const addGroup=()=>{if(!newGroupName.trim())return;const id="g"+uid();setGroups(g=>[...g,{id,name:newGroupName.trim(),teams:[]}]);setNewGroupName("");};
-  const removeGroup=id=>setGroups(g=>g.filter(x=>x.id!==id));
+
+  // Purge all stale references to a teamId across all state
+  const purgeTeam=(tid)=>{
+    setTeamGameOverrides(o=>{const c={...o};delete c[tid];return c;});
+    setTeamRestrictions(r=>{const c={...r};delete c[tid];return c;});
+    setLinkedGroups(lg=>lg.map(l=>l.filter(t=>t!==tid)).filter(l=>l.length>1));
+    setPinnedMatchups(p=>{const c={...p};Object.keys(c).forEach(k=>{if(k.includes(tid))delete c[k];});return c;});
+    setExcludedMatchups(s=>new Set([...s].filter(k=>!k.includes(tid))));
+    setMustPlayMatchups(s=>new Set([...s].filter(k=>!k.includes(tid))));
+  };
+
+  // Purge all stale references to a groupId across all state
+  const purgeGroup=(gid)=>{
+    setGroupBlockRules(r=>{
+      const c={};
+      for(const [k,v] of Object.entries(r)){if(k===gid)continue;c[k]=(v||[]).filter(id=>id!==gid);}
+      return c;
+    });
+    setCourtGroupPrimary(p=>{
+      const c={};
+      for(const [cid,gs] of Object.entries(p))c[cid]=(gs||[]).filter(id=>id!==gid);
+      return c;
+    });
+  };
+
+  const removeGroup=id=>{
+    const group=groups.find(g=>g.id===id);
+    if(group){
+      group.teams.forEach(tid=>{setTeams(t=>{const c={...t};delete c[tid];return c;});purgeTeam(tid);});
+    }
+    setGroups(g=>g.filter(x=>x.id!==id));
+    purgeGroup(id);
+  };
   const updateGroupName=(id,name)=>setGroups(g=>g.map(x=>x.id===id?{...x,name}:x));
   const addTeam=gid=>{const name=(newTeamName[gid]||"").trim();if(!name)return;const id="t"+uid();const ci=Object.keys(teams).length%TEAM_COLORS.length;setTeams(t=>({...t,[id]:{id,name,color:TEAM_COLORS[ci]}}));setGroups(g=>g.map(x=>x.id===gid?{...x,teams:[...x.teams,id]}:x));setNewTeamName(n=>({...n,[gid]:""}));};
-  const removeTeam=(gid,tid)=>{setGroups(g=>g.map(x=>x.id===gid?{...x,teams:x.teams.filter(t=>t!==tid)}:x));setTeams(t=>{const c={...t};delete c[tid];return c;});setLinkedGroups(lg=>lg.map(l=>l.filter(t=>t!==tid)).filter(l=>l.length>1));};
+  const removeTeam=(gid,tid)=>{
+    setGroups(g=>g.map(x=>x.id===gid?{...x,teams:x.teams.filter(t=>t!==tid)}:x));
+    setTeams(t=>{const c={...t};delete c[tid];return c;});
+    purgeTeam(tid);
+  };
   const updTeamName=(id,name)=>setTeams(t=>({...t,[id]:{...t[id],name}}));
   const updTeamColor=(id,color)=>setTeams(t=>({...t,[id]:{...t[id],color}}));
 
@@ -993,8 +1029,17 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
 
   // Schedule
   const buildSchedule=()=>{
+    // Sanitize: remove overrides/restrictions for teams that no longer exist
+    const validTeamIds=new Set(Object.keys(teams));
+    const cleanOverrides=Object.fromEntries(Object.entries(teamGameOverrides).filter(([id])=>validTeamIds.has(id)));
+    const cleanRestrictions=Object.fromEntries(Object.entries(teamRestrictions).filter(([id])=>validTeamIds.has(id)));
+    const cleanPinned=Object.fromEntries(Object.entries(pinnedMatchups).filter(([k])=>k.split("__").every(id=>validTeamIds.has(id))));
+    const cleanExcluded=new Set([...excludedMatchups].filter(k=>k.split("__").every(id=>validTeamIds.has(id))));
+    const cleanMust=new Set([...mustPlayMatchups].filter(k=>k.split("__").every(id=>validTeamIds.has(id))));
     try{
-      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions});
+      const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,
+        pinnedMatchups:cleanPinned,mustPlayMatchups:cleanMust,excludedMatchups:cleanExcluded,
+        targetGamesPerTeam,teamGameOverrides:cleanOverrides,groupBlockRules,teamRestrictions:cleanRestrictions});
       setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
     }catch(err){
       setSchedule([]);setScheduleWarnings([`Scheduler error: ${err.message}`]);setTab("schedule");

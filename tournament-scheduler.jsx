@@ -797,6 +797,269 @@ function ShareDrawer({ open, onClose, tournamentId, currentUserId }) {
   );
 }
 
+// ─── PRINT MODAL ─────────────────────────────────────────────────────────────
+function PrintModal({open, onClose, schedule, groups, teams, courts, tournamentName, gameDuration}){
+  const [printGrid, setPrintGrid]=useState(true);
+  const [printByVenue, setPrintByVenue]=useState(true);
+  const [printByCourt, setPrintByCourt]=useState(true);
+  const [printAllTeams, setPrintAllTeams]=useState(true);
+  const [selectedTeams, setSelectedTeams]=useState(new Set());
+  const [teamSearch, setTeamSearch]=useState("");
+
+  if(!open) return null;
+
+  const allTeams=groups.flatMap(g=>g.teams).map(id=>teams[id]).filter(Boolean);
+  const filteredTeams=allTeams.filter(t=>t.name.toLowerCase().includes(teamSearch.toLowerCase()));
+
+  const sortedDates=[...new Set((schedule||[]).map(s=>s.date))].sort();
+
+  const doPrint=()=>{
+    const win=window.open("","_blank","width=1200,height=900");
+    if(!win) return;
+
+    const fmtTime=m=>{const h=Math.floor(m/60)%24,mn=m%60;return`${h%12||12}:${String(mn).padStart(2,"0")} ${h<12?"AM":"PM"}`;};
+    const fmtDate=d=>{const [y,mo,day]=d.split("-");const months=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];return`${months[parseInt(mo)-1]} ${parseInt(day)}, ${y}`;};
+
+    let html=`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>${tournamentName||"Tournament Schedule"}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:Arial,sans-serif;font-size:11px;color:#000;background:#fff;}
+  h1{font-size:18px;font-weight:bold;margin-bottom:4px;}
+  h2{font-size:14px;font-weight:bold;margin:16px 0 8px;padding:4px 8px;background:#f0f0f0;border-left:4px solid #333;}
+  h3{font-size:12px;font-weight:bold;margin:10px 0 4px;}
+  .section{margin-bottom:24px;}
+  .grid-table{width:100%;border-collapse:collapse;margin-bottom:12px;page-break-inside:avoid;}
+  .grid-table th{background:#333;color:#fff;padding:5px 7px;text-align:left;font-size:10px;border:1px solid #555;}
+  .grid-table td{padding:5px 7px;border:1px solid #ddd;vertical-align:top;font-size:10px;}
+  .grid-table tr:nth-child(even) td{background:#f9f9f9;}
+  .time-col{font-weight:bold;white-space:nowrap;min-width:65px;}
+  .game-cell{min-height:32px;}
+  .team-a{font-weight:bold;}
+  .team-b{color:#444;}
+  .closed{color:#aaa;font-style:italic;font-size:9px;}
+  .open{color:#aaa;font-style:italic;font-size:9px;}
+  .team-card{border:1px solid #ddd;border-radius:4px;padding:8px 10px;margin-bottom:8px;page-break-inside:avoid;break-inside:avoid;}
+  .team-name{font-weight:bold;font-size:13px;margin-bottom:5px;}
+  .game-row{display:flex;gap:10px;padding:3px 0;border-top:1px solid #eee;align-items:center;font-size:10px;}
+  .game-date{color:#555;min-width:70px;}
+  .game-time{font-weight:bold;min-width:60px;}
+  .game-opp{flex:1;}
+  .game-court{color:#666;min-width:80px;text-align:right;}
+  .teams-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .venue-section{page-break-before:auto;}
+  @media print{
+    body{font-size:10px;}
+    h2{page-break-before:auto;}
+    .page-break{page-break-before:always;}
+  }
+</style></head><body>`;
+
+    html+=`<h1>${tournamentName||"Tournament Schedule"}</h1>
+<p style="margin-bottom:16px;color:#555;">${(schedule||[]).length} games · ${sortedDates.length} day(s) · Generated ${new Date().toLocaleDateString()}</p>`;
+
+    // ── Full Grid ──
+    if(printGrid){
+      html+=`<div class="section"><h2>📅 Full Schedule Grid</h2>`;
+      for(const date of sortedDates){
+        const dayGames=(schedule||[]).filter(s=>s.date===date);
+        const slotTimes=[...new Set(dayGames.map(s=>s.absTimeMins))].sort((a,b)=>a-b);
+        // Also include open court slots
+        const allTimes=[...new Set([
+          ...slotTimes,
+          ...courts.flatMap(c=>(c.windows||[]).filter(w=>w.date===date).flatMap(w=>{
+            const slots=[];let cur=timeMins(w.open);while(cur<=timeMins(w.close)){slots.push(cur);cur+=gameDuration;}return slots;
+          }))
+        ])].sort((a,b)=>a-b);
+
+        html+=`<h3>${fmtDate(date)}</h3>
+<table class="grid-table"><thead><tr><th>Time</th>`;
+        for(const court of courts) html+=`<th>${court.name}${court.location?`<br><span style="font-weight:normal;font-size:9px;">${court.location}</span>`:""}</th>`;
+        html+=`</tr></thead><tbody>`;
+        for(const t of allTimes){
+          html+=`<tr><td class="time-col">${fmtTime(t)}<br><span style="font-weight:normal;color:#888;">${gameDuration}min</span></td>`;
+          for(const court of courts){
+            const game=dayGames.find(s=>s.absTimeMins===t&&s.courtId===court.id);
+            const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=t&&t<=timeMins(w.close));
+            if(game){
+              const home=teams[game.match.home],away=teams[game.match.away];
+              html+=`<td class="game-cell"><span class="team-a">${home?.name||"?"}</span><br><span style="color:#888;font-size:9px;">vs</span><br><span class="team-b">${away?.name||"?"}</span></td>`;
+            } else if(!courtOpen){
+              html+=`<td><span class="closed">— closed —</span></td>`;
+            } else {
+              html+=`<td><span class="open">— open —</span></td>`;
+            }
+          }
+          html+=`</tr>`;
+        }
+        html+=`</tbody></table>`;
+      }
+      html+=`</div>`;
+    }
+
+    // ── By Venue ──
+    if(printByVenue){
+      const venues=[...new Set(courts.map(c=>c.location||c.name))];
+      html+=`<div class="section"><h2>🏟️ Schedule by Venue</h2>`;
+      for(const venue of venues){
+        const venueCourts=courts.filter(c=>(c.location||c.name)===venue);
+        const venueGames=(schedule||[]).filter(s=>venueCourts.some(c=>c.id===s.courtId));
+        if(!venueGames.length) continue;
+        html+=`<h3>${venue}</h3><table class="grid-table"><thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Home</th><th>Away</th></tr></thead><tbody>`;
+        [...venueGames].sort((a,b)=>a.slotKey-b.slotKey).forEach(s=>{
+          const court=courts.find(c=>c.id===s.courtId);
+          html+=`<tr><td>${fmtDate(s.date)}</td><td>${s.timeLabel}</td><td>${court?.name||""}</td><td class="team-a">${teams[s.match.home]?.name||""}</td><td>${teams[s.match.away]?.name||""}</td></tr>`;
+        });
+        html+=`</tbody></table>`;
+      }
+      html+=`</div>`;
+    }
+
+    // ── By Court ──
+    if(printByCourt){
+      html+=`<div class="section"><h2>🏀 Schedule by Court</h2>`;
+      for(const court of courts){
+        const courtGames=(schedule||[]).filter(s=>s.courtId===court.id);
+        if(!courtGames.length) continue;
+        html+=`<h3>${court.name}${court.location?" · "+court.location:""}</h3><table class="grid-table"><thead><tr><th>Date</th><th>Time</th><th>Home</th><th>Away</th></tr></thead><tbody>`;
+        [...courtGames].sort((a,b)=>a.slotKey-b.slotKey).forEach(s=>{
+          html+=`<tr><td>${fmtDate(s.date)}</td><td>${s.timeLabel}</td><td class="team-a">${teams[s.match.home]?.name||""}</td><td>${teams[s.match.away]?.name||""}</td></tr>`;
+        });
+        html+=`</tbody></table>`;
+      }
+      html+=`</div>`;
+    }
+
+    // ── Team Schedules ──
+    const teamsToPrint=printAllTeams ? allTeams : allTeams.filter(t=>selectedTeams.has(t.id));
+    if(teamsToPrint.length>0){
+      html+=`<div class="section"><h2>👥 Team Schedules</h2><div class="teams-grid">`;
+      for(const team of teamsToPrint){
+        const tGames=(schedule||[]).filter(s=>s.match.home===team.id||s.match.away===team.id).sort((a,b)=>a.slotKey-b.slotKey);
+        html+=`<div class="team-card"><div class="team-name">${team.name} <span style="font-weight:normal;font-size:10px;color:#666;">${tGames.length} game${tGames.length!==1?"s":""}</span></div>`;
+        for(const s of tGames){
+          const opp=s.match.home===team.id?teams[s.match.away]:teams[s.match.home];
+          const crt=courts.find(c=>c.id===s.courtId);
+          html+=`<div class="game-row"><span class="game-date">${fmtDate(s.date)}</span><span class="game-time">${s.timeLabel}</span><span class="game-opp">vs ${opp?.name||"?"}</span><span class="game-court">${crt?.name||""}</span></div>`;
+        }
+        if(!tGames.length) html+=`<div style="color:#aaa;font-style:italic;font-size:10px;">No games scheduled</div>`;
+        html+=`</div>`;
+      }
+      html+=`</div></div>`;
+    }
+
+    html+=`</body></html>`;
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(()=>win.print(), 500);
+  };
+
+  const toggleTeam=id=>setSelectedTeams(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
+  const allTeamIds=allTeams.map(t=>t.id);
+
+  return (
+    <>
+      <div onClick={onClose} style={{position:"fixed",inset:0,background:"#00000077",zIndex:300}}/>
+      <div style={{position:"fixed",top:"5%",left:"50%",transform:"translateX(-50%)",width:"min(560px,95vw)",
+        maxHeight:"90vh",overflowY:"auto",background:P.surface,border:`1px solid ${P.border}`,
+        borderRadius:14,zIndex:301,boxShadow:"0 8px 40px #00000066"}}>
+        <div style={{padding:"18px 22px",borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center"}}>
+          <span style={{fontSize:20,marginRight:10}}>🖨️</span>
+          <span style={{fontWeight:800,fontSize:16,color:P.accent,flex:1}}>Print Schedule</span>
+          <span onClick={onClose} style={{cursor:"pointer",color:P.muted,fontSize:20}}>✕</span>
+        </div>
+        <div style={{padding:"18px 22px"}}>
+          <div style={{fontWeight:700,color:P.text,fontSize:13,marginBottom:12}}>What to print:</div>
+
+          {/* Checkboxes */}
+          {[
+            [printGrid,setPrintGrid,"📅 Full Schedule Grid","All games in a court × time grid"],
+            [printByVenue,setPrintByVenue,"🏟️ Schedule by Venue","Games grouped by gym/venue"],
+            [printByCourt,setPrintByCourt,"🏀 Schedule by Court","Games grouped by individual court"],
+          ].map(([val,set,label,sub])=>(
+            <div key={label} onClick={()=>set(!val)} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",
+              background:val?P.accent+"18":P.bg,border:`1px solid ${val?P.accent+"66":P.border}`,
+              borderRadius:8,cursor:"pointer",marginBottom:8}}>
+              <div style={{width:20,height:20,borderRadius:4,background:val?P.accent:"transparent",
+                border:`2px solid ${val?P.accent:P.border}`,display:"flex",alignItems:"center",
+                justifyContent:"center",color:"#000",fontSize:13,fontWeight:900,flexShrink:0}}>
+                {val?"✓":""}
+              </div>
+              <div>
+                <div style={{fontWeight:700,fontSize:13,color:val?P.accent:P.text}}>{label}</div>
+                <div style={{fontSize:11,color:P.muted}}>{sub}</div>
+              </div>
+            </div>
+          ))}
+
+          {/* Team schedules */}
+          <div style={{background:P.bg,border:`1px solid ${P.border}`,borderRadius:8,padding:"12px",marginBottom:8}}>
+            <div onClick={()=>setPrintAllTeams(!printAllTeams)} style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",marginBottom:printAllTeams?0:12}}>
+              <div style={{width:20,height:20,borderRadius:4,background:printAllTeams||selectedTeams.size>0?P.accent:"transparent",
+                border:`2px solid ${printAllTeams||selectedTeams.size>0?P.accent:P.border}`,display:"flex",alignItems:"center",
+                justifyContent:"center",color:"#000",fontSize:13,fontWeight:900,flexShrink:0}}>
+                {printAllTeams||selectedTeams.size>0?"✓":""}
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:13,color:P.accent}}>👥 Team Schedules</div>
+                <div style={{fontSize:11,color:P.muted}}>Individual schedule card for each team</div>
+              </div>
+              <Btn small variant="ghost" onClick={e=>{e.stopPropagation();setPrintAllTeams(v=>!v);}}>
+                {printAllTeams?"All teams":"Select teams"}
+              </Btn>
+            </div>
+
+            {!printAllTeams&&(
+              <div>
+                <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+                  <input value={teamSearch} onChange={e=>setTeamSearch(e.target.value)} placeholder="Search teams…"
+                    style={{flex:1,background:P.bg,border:`1px solid ${P.border}`,borderRadius:6,color:P.text,
+                      padding:"5px 9px",fontFamily:"inherit",fontSize:12,outline:"none"}}/>
+                  <Btn small variant="ghost" onClick={()=>setSelectedTeams(new Set(allTeamIds))}>All</Btn>
+                  <Btn small variant="ghost" onClick={()=>setSelectedTeams(new Set())}>None</Btn>
+                </div>
+                <div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                  {groups.map(group=>(
+                    <div key={group.id}>
+                      <div style={{color:P.accent,fontSize:10,fontWeight:700,textTransform:"uppercase",padding:"4px 0",letterSpacing:0.5}}>{group.name}</div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                        {group.teams.map(tid=>{
+                          const team=teams[tid]; if(!team) return null;
+                          if(!team.name.toLowerCase().includes(teamSearch.toLowerCase())) return null;
+                          const sel=selectedTeams.has(tid);
+                          return (
+                            <div key={tid} onClick={()=>toggleTeam(tid)} style={{
+                              display:"flex",alignItems:"center",gap:5,padding:"3px 8px",borderRadius:12,cursor:"pointer",
+                              background:sel?team.color+"33":P.bg,border:`1px solid ${sel?team.color:P.border}`,
+                            }}>
+                              <div style={{width:7,height:7,borderRadius:"50%",background:team.color}}/>
+                              <span style={{fontSize:11,color:sel?team.color:P.muted,fontWeight:sel?700:400}}>{team.name}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginTop:6,fontSize:11,color:P.muted}}>{selectedTeams.size} team{selectedTeams.size!==1?"s":""} selected</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{display:"flex",gap:10,marginTop:16}}>
+            <Btn onClick={doPrint} disabled={!printGrid&&!printByVenue&&!printByCourt&&!printAllTeams&&!selectedTeams.size}
+              style={{flex:1,justifyContent:"center"}}>
+              🖨️ Open Print Preview
+            </Btn>
+            <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ─── APP ─────────────────────────────────────────────────────────────────────
 export default function App(){
   // ── Auth state ────────────────────────────────────────────────────────────
@@ -898,6 +1161,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const [createTeamA,setCreateTeamA]=useState("");
   const [createTeamB,setCreateTeamB]=useState("");
   const [dragSuggestion,setDragSuggestion]=useState(null);
+  const [printOpen,setPrintOpen]=useState(false);
 
   const currentState=useCallback(()=>({
     groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,
@@ -1141,6 +1405,10 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
 
       <ShareDrawer open={shareOpen} onClose={()=>setShareOpen(false)}
         tournamentId={tournamentId} currentUserId={user.id}/>
+
+      <PrintModal open={printOpen} onClose={()=>setPrintOpen(false)}
+        schedule={schedule||[]} groups={groups} teams={teams} courts={courts}
+        tournamentName={tournamentName} gameDuration={gameDuration}/>
 
       {/* Header */}
       <div style={{background:P.surface,borderBottom:`1px solid ${P.border}`,padding:"13px 22px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -2007,6 +2275,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                 <div style={{marginTop:20,display:"flex",gap:10,flexWrap:"wrap"}}>
                   <Btn onClick={buildSchedule} variant="secondary">↺ Regenerate</Btn>
                   <Btn variant="purple" onClick={()=>{setCreateMode(true);setSelectedGame(null);setCreateTeamA("");setCreateTeamB("");}}>✏️ Create Game</Btn>
+                  <Btn variant="secondary" onClick={()=>setPrintOpen(true)}>🖨️ Print</Btn>
                 </div>
               </>
             ))()}

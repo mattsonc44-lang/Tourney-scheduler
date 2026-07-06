@@ -418,7 +418,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   const usedCourtSlot = {};
   const slotTeams     = {};
   const teamCount     = {};
-  const teamDayCount  = {};
   const resultSlots   = [];
   const playedPairs   = new Set(); // matchKey strings already scheduled
 
@@ -452,41 +451,16 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     slotTeams[sk].add(home); slotTeams[sk].add(away);
     teamCount[home]=(teamCount[home]||0)+1;
     teamCount[away]=(teamCount[away]||0)+1;
-    teamDayCount[`${home}-${meta.dayIdx}`]=(teamDayCount[`${home}-${meta.dayIdx}`]||0)+1;
-    teamDayCount[`${away}-${meta.dayIdx}`]=(teamDayCount[`${away}-${meta.dayIdx}`]||0)+1;
     playedPairs.add(matchKey(home,away));
   };
-
-  // Build slots grouped by day for day-balanced scheduling
-  const slotsByDay = {};
-  for(const sk of allSlotKeys){
-    const d = slotMeta[sk].dayIdx;
-    (slotsByDay[d] = slotsByDay[d]||[]).push(sk);
-  }
 
   const findSlot = (home, away, groupId) => {
     const sortedCourts = [...courts].sort((a,b)=>
       ((courtGroupPrimary[a.id]||[]).includes(groupId)?0:1)-((courtGroupPrimary[b.id]||[]).includes(groupId)?0:1));
-
-    // Prefer the day where this pair has fewer games combined.
-    // Tie-break: whichever day has fewer total games placed overall.
-    const score0 = (teamDayCount[`${home}-0`]||0) + (teamDayCount[`${away}-0`]||0);
-    const score1 = (teamDayCount[`${home}-1`]||0) + (teamDayCount[`${away}-1`]||0);
-    const totalDay0 = resultSlots.filter(s=>s.dayIdx===0).length;
-    const totalDay1 = resultSlots.filter(s=>s.dayIdx===1).length;
-    const effectiveScore0 = score0 * 100 + totalDay0;
-    const effectiveScore1 = score1 * 100 + totalDay1;
-    const dayOrder = effectiveScore0 <= effectiveScore1 ? [0,1] : [1,0];
-
-    for(const dayIdx of dayOrder){
-      for(const sk of (slotsByDay[dayIdx]||[])){
-        for(const court of sortedCourts){
-          if(!courtSlots[court.id].has(sk)) continue;
-          if(usedCourtSlot[`${court.id}-${sk}`]) continue;
-          if(canPlace(sk, home, away)) return {sk, court};
-        }
-      }
-    }
+    for(const sk of allSlotKeys)
+      for(const court of sortedCourts)
+        if(courtSlots[court.id].has(sk)&&!usedCourtSlot[`${court.id}-${sk}`]&&canPlace(sk,home,away))
+          return {sk, court};
     return null;
   };
 

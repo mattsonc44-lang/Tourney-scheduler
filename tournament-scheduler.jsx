@@ -475,22 +475,16 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     const sorted = [...courts].sort((a,b)=>
       ((courtGroupPrimary[a.id]||[]).includes(groupId)?0:1)-((courtGroupPrimary[b.id]||[]).includes(groupId)?0:1));
 
-    // Try balanced order first: prefer the day where BOTH teams have fewer games
-    const homeDayCounts = Object.fromEntries(
-      Array.from({length:numDays},(_,d)=>[d, teamDayCount[`${home}-${d}`]||0])
-    );
-    const awayDayCounts = Object.fromEntries(
-      Array.from({length:numDays},(_,d)=>[d, teamDayCount[`${away}-${d}`]||0])
-    );
     // Score each day: lower = more preferred for this pair
-    const dayScore = d => (homeDayCounts[d]||0) + (awayDayCounts[d]||0);
+    const dayScore = d => (teamDayCount[`${home}-${d}`]||0) + (teamDayCount[`${away}-${d}`]||0);
 
-    // Build slot order: interleaved but biased toward less-loaded day for this pair
+    // Sort slots: prefer lower-score days, then within same day-score use interleaved order
     const orderedSlots = [...balancedSlotOrder].sort((a,b)=>{
       const da=slotMeta[a].dayIdx, db=slotMeta[b].dayIdx;
-      const scoreDiff = dayScore(da) - dayScore(db);
-      if(scoreDiff !== 0) return scoreDiff;
-      return a - b; // same day score: earlier slot first
+      const sa=dayScore(da), sb=dayScore(db);
+      if(sa!==sb) return sa-sb; // lower load day first
+      if(da!==db) return da-db; // same score: keep interleaved order (already alternating)
+      return a-b; // same day: earlier slot first
     });
 
     for(const sk of orderedSlots)

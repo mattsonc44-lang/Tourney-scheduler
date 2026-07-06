@@ -468,22 +468,18 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     const sortedCourts = [...courts].sort((a,b)=>
       ((courtGroupPrimary[a.id]||[]).includes(groupId)?0:1)-((courtGroupPrimary[b.id]||[]).includes(groupId)?0:1));
 
-    // Count games per day for each team
-    const homeDay0 = teamDayCount[`${home}-0`]||0;
-    const homeDay1 = teamDayCount[`${home}-1`]||0;
-    const awayDay0 = teamDayCount[`${away}-0`]||0;
-    const awayDay1 = teamDayCount[`${away}-1`]||0;
-
-    // Score each day for this pair — lower is better (less loaded)
-    const score0 = homeDay0 + awayDay0;
-    const score1 = homeDay1 + awayDay1;
-
-    // Build day priority: preferred day first, then fallback
-    const dayOrder = score0 <= score1 ? [0, 1] : [1, 0];
+    // Prefer the day where this pair has fewer games combined.
+    // Tie-break: whichever day has fewer total games placed overall.
+    const score0 = (teamDayCount[`${home}-0`]||0) + (teamDayCount[`${away}-0`]||0);
+    const score1 = (teamDayCount[`${home}-1`]||0) + (teamDayCount[`${away}-1`]||0);
+    const totalDay0 = resultSlots.filter(s=>s.dayIdx===0).length;
+    const totalDay1 = resultSlots.filter(s=>s.dayIdx===1).length;
+    const effectiveScore0 = score0 * 100 + totalDay0;
+    const effectiveScore1 = score1 * 100 + totalDay1;
+    const dayOrder = effectiveScore0 <= effectiveScore1 ? [0,1] : [1,0];
 
     for(const dayIdx of dayOrder){
-      const daySlots = (slotsByDay[dayIdx]||[]);
-      for(const sk of daySlots){
+      for(const sk of (slotsByDay[dayIdx]||[])){
         for(const court of sortedCourts){
           if(!courtSlots[court.id].has(sk)) continue;
           if(usedCourtSlot[`${court.id}-${sk}`]) continue;

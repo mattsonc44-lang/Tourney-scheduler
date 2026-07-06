@@ -457,40 +457,40 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     playedPairs.add(matchKey(home,away));
   };
 
-  // Build day-interleaved slot order: slot 1 fri, slot 1 sat, slot 2 fri, slot 2 sat...
-  // This spreads games evenly across days instead of filling fri before touching sat.
+  // Build slots grouped by day for day-balanced scheduling
   const slotsByDay = {};
   for(const sk of allSlotKeys){
     const d = slotMeta[sk].dayIdx;
     (slotsByDay[d] = slotsByDay[d]||[]).push(sk);
   }
-  const numDays = Object.keys(slotsByDay).length;
-  const maxDaySlots = Math.max(...Object.values(slotsByDay).map(a=>a.length));
-  const balancedSlotOrder = [];
-  for(let i=0; i<maxDaySlots; i++)
-    for(let d=0; d<numDays; d++)
-      if(slotsByDay[d]&&slotsByDay[d][i]) balancedSlotOrder.push(slotsByDay[d][i]);
 
   const findSlot = (home, away, groupId) => {
-    const sorted = [...courts].sort((a,b)=>
+    const sortedCourts = [...courts].sort((a,b)=>
       ((courtGroupPrimary[a.id]||[]).includes(groupId)?0:1)-((courtGroupPrimary[b.id]||[]).includes(groupId)?0:1));
 
-    // Score each day: lower = more preferred for this pair
-    const dayScore = d => (teamDayCount[`${home}-${d}`]||0) + (teamDayCount[`${away}-${d}`]||0);
+    // Count games per day for each team
+    const homeDay0 = teamDayCount[`${home}-0`]||0;
+    const homeDay1 = teamDayCount[`${home}-1`]||0;
+    const awayDay0 = teamDayCount[`${away}-0`]||0;
+    const awayDay1 = teamDayCount[`${away}-1`]||0;
 
-    // Sort slots: prefer lower-score days, then within same day-score use interleaved order
-    const orderedSlots = [...balancedSlotOrder].sort((a,b)=>{
-      const da=slotMeta[a].dayIdx, db=slotMeta[b].dayIdx;
-      const sa=dayScore(da), sb=dayScore(db);
-      if(sa!==sb) return sa-sb; // lower load day first
-      if(da!==db) return da-db; // same score: keep interleaved order (already alternating)
-      return a-b; // same day: earlier slot first
-    });
+    // Score each day for this pair — lower is better (less loaded)
+    const score0 = homeDay0 + awayDay0;
+    const score1 = homeDay1 + awayDay1;
 
-    for(const sk of orderedSlots)
-      for(const c of sorted)
-        if(courtSlots[c.id].has(sk)&&!usedCourtSlot[`${c.id}-${sk}`]&&canPlace(sk,home,away))
-          return {sk, court:c};
+    // Build day priority: preferred day first, then fallback
+    const dayOrder = score0 <= score1 ? [0, 1] : [1, 0];
+
+    for(const dayIdx of dayOrder){
+      const daySlots = (slotsByDay[dayIdx]||[]);
+      for(const sk of daySlots){
+        for(const court of sortedCourts){
+          if(!courtSlots[court.id].has(sk)) continue;
+          if(usedCourtSlot[`${court.id}-${sk}`]) continue;
+          if(canPlace(sk, home, away)) return {sk, court};
+        }
+      }
+    }
     return null;
   };
 

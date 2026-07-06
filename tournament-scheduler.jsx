@@ -510,7 +510,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     while(changed){
       changed=false;
       const needy=allTeamIds
-        .filter(id=>(teamCount[id]||0)<level && (teamCount[id]||0)<teamCap(id))
+        .filter(id=>(teamCount[id]||0)<level && (teamCount[id]||0)<TARGET)
         .sort((a,b)=>{
           // Most constrained first: fewest unplayed opponents also under this level
           const aOpts=allTeamIds.filter(x=>{
@@ -1054,7 +1054,11 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const buildSchedule=()=>{
     // Sanitize: remove overrides/restrictions for teams that no longer exist
     const validTeamIds=new Set(Object.keys(teams));
-    const cleanOverrides=Object.fromEntries(Object.entries(teamGameOverrides).filter(([id])=>validTeamIds.has(id)));
+    // Only keep overrides for valid teams AND only if they're strictly above TARGET
+    const cleanOverrides=Object.fromEntries(
+      Object.entries(teamGameOverrides)
+        .filter(([id,val])=>validTeamIds.has(id) && val > (targetGamesPerTeam||4))
+    );
     const cleanRestrictions=Object.fromEntries(Object.entries(teamRestrictions).filter(([id])=>validTeamIds.has(id)));
     const cleanPinned=Object.fromEntries(Object.entries(pinnedMatchups).filter(([k])=>k.split("__").every(id=>validTeamIds.has(id))));
     const cleanExcluded=new Set([...excludedMatchups].filter(k=>k.split("__").every(id=>validTeamIds.has(id))));

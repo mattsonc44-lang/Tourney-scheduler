@@ -1450,9 +1450,17 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                 </div>
               </div>
               <div style={{marginBottom:24}}>
-                <Lbl>Per-Team Game Overrides</Lbl>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+                  <Lbl style={{margin:0}}>Per-Team Game Overrides</Lbl>
+                  {Object.keys(teamGameOverrides).length>0&&(
+                    <button onClick={()=>setTeamGameOverrides({})} style={{
+                      background:P.red+"22",color:P.red,border:`1px solid ${P.red}44`,
+                      borderRadius:6,padding:"3px 10px",cursor:"pointer",fontFamily:"inherit",fontSize:12,fontWeight:700
+                    }}>✕ Clear All ({Object.keys(teamGameOverrides).length})</button>
+                  )}
+                </div>
                 <div style={{fontSize:12,color:P.muted,marginBottom:10}}>
-                  Specific teams that should play more or fewer games than the target.
+                  Specific teams that should play more games than the target. Only set values <strong>above</strong> {targetGamesPerTeam}.
                 </div>
                 {allTeams.length===0&&<div style={{color:P.muted,fontSize:12,fontStyle:"italic"}}>Add teams first.</div>}
                 <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:280,overflowY:"auto"}}>

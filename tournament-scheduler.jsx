@@ -1416,6 +1416,18 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
         {tab==="settings"&&(
           <div>
             <SecHead title="Schedule Settings" sub="Configure game duration."/>
+            {/* Debug: show raw override data */}
+            <Card style={{marginBottom:12,background:P.red+"11",border:`1px solid ${P.red}44`}}>
+              <div style={{color:P.red,fontWeight:700,fontSize:13,marginBottom:6}}>⚠️ Override Debug</div>
+              <div style={{color:P.muted,fontSize:12,marginBottom:8}}>Raw teamGameOverrides from Supabase:</div>
+              <div style={{fontFamily:"monospace",fontSize:11,color:P.text,wordBreak:"break-all"}}>
+                {JSON.stringify(teamGameOverrides)||"{}"}
+              </div>
+              <button onClick={()=>{setTeamGameOverrides({});}} style={{
+                marginTop:10,background:P.red,color:"#fff",border:"none",borderRadius:6,
+                padding:"6px 14px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13
+              }}>Force Clear All Overrides</button>
+            </Card>
             <Card style={{maxWidth:500}}>
               <div style={{marginBottom:24}}>
                 <Lbl>Game Duration</Lbl>

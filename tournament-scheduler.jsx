@@ -894,7 +894,13 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
     setGroups(st.groups||[]);setTeams(st.teams||{});
     setCourts(st.courts||[]);setCourtGroupPrimary(st.courtGroupPrimary||{});
     setGameDuration(st.gameDuration||30);setTargetGamesPerTeam(st.targetGamesPerTeam||4);
-    setTeamGameOverrides(st.teamGameOverrides||{});setGroupBlockRules(st.groupBlockRules||{});setTeamRestrictions(st.teamRestrictions||{});
+    // Strip any overrides that are <= target (stale data cleanup)
+    const tgt=st.targetGamesPerTeam||4;
+    const cleanedOverrides=Object.fromEntries(
+      Object.entries(st.teamGameOverrides||{}).filter(([,v])=>v>tgt)
+    );
+    setTeamGameOverrides(cleanedOverrides);
+    setGroupBlockRules(st.groupBlockRules||{});setTeamRestrictions(st.teamRestrictions||{});
     setLinkedGroups(st.linkedGroups||[]);
     setPinnedMatchups(st.pinnedMatchups||{});
     setMustPlayMatchups(new Set(st.mustPlayMatchups||[]));

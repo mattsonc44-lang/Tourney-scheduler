@@ -86,6 +86,8 @@ function serializeState(state) {
     pinnedMatchups: state.pinnedMatchups,
     mustPlayMatchups: [...(state.mustPlayMatchups instanceof Set ? state.mustPlayMatchups : (state.mustPlayMatchups||[]))],
     excludedMatchups: [...(state.excludedMatchups instanceof Set ? state.excludedMatchups : (state.excludedMatchups||[]))],
+    savedSchedule: state.savedSchedule||null,
+    scheduleWarnings: state.scheduleWarnings||[],
   };
 }
 function deserializeState(raw) {
@@ -1166,7 +1168,9 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const currentState=useCallback(()=>({
     groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,
     pinnedMatchups,mustPlayMatchups:[...mustPlayMatchups],excludedMatchups:[...excludedMatchups],
-  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,pinnedMatchups,mustPlayMatchups,excludedMatchups]);
+    savedSchedule: schedule||null,
+    scheduleWarnings: scheduleWarnings||[],
+  }),[groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,pinnedMatchups,mustPlayMatchups,excludedMatchups,schedule,scheduleWarnings]);
 
   const applyState=st=>{
     setGroups(st.groups||[]);setTeams(st.teams||{});
@@ -1183,7 +1187,14 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
     setPinnedMatchups(st.pinnedMatchups||{});
     setMustPlayMatchups(new Set(st.mustPlayMatchups||[]));
     setExcludedMatchups(st.excludedMatchups instanceof Set?st.excludedMatchups:new Set(st.excludedMatchups||[]));
-    setSchedule(null);setScheduleWarnings([]);setTab("groups");
+    // Restore saved schedule if present — don't auto-regenerate
+    if(st.savedSchedule&&st.savedSchedule.length>0){
+      setSchedule(st.savedSchedule);
+      setScheduleWarnings(st.scheduleWarnings||[]);
+      setTab("schedule");
+    } else {
+      setSchedule(null);setScheduleWarnings([]);setTab("groups");
+    }
   };
 
   // Save to Supabase (debounced auto-save + manual save)
@@ -1335,14 +1346,9 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const removeLink=i=>setLinkedGroups(lg=>lg.filter((_,j)=>j!==i));
 
   // Schedule
-  const buildSchedule=()=>{
-    // Sanitize: remove overrides/restrictions for teams that no longer exist
+  const buildSchedule=useCallback(()=>{
     const validTeamIds=new Set(Object.keys(teams));
-    // Only keep overrides for valid teams AND only if they're strictly above TARGET
-    const cleanOverrides=Object.fromEntries(
-      Object.entries(teamGameOverrides)
-        .filter(([id,val])=>validTeamIds.has(id) && val > (targetGamesPerTeam||4))
-    );
+    const cleanOverrides=Object.fromEntries(Object.entries(teamGameOverrides).filter(([id,val])=>validTeamIds.has(id)&&val>(targetGamesPerTeam||4)));
     const cleanRestrictions=Object.fromEntries(Object.entries(teamRestrictions).filter(([id])=>validTeamIds.has(id)));
     const cleanPinned=Object.fromEntries(Object.entries(pinnedMatchups).filter(([k])=>k.split("__").every(id=>validTeamIds.has(id))));
     const cleanExcluded=new Set([...excludedMatchups].filter(k=>k.split("__").every(id=>validTeamIds.has(id))));
@@ -1351,11 +1357,20 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
       const res=generateSchedule({groups,teams,courts,gameDurationMins:gameDuration,linkedGroups,courtGroupPrimary,
         pinnedMatchups:cleanPinned,mustPlayMatchups:cleanMust,excludedMatchups:cleanExcluded,
         targetGamesPerTeam,teamGameOverrides:cleanOverrides,groupBlockRules,teamRestrictions:cleanRestrictions});
-      setSchedule(res.slots);setScheduleWarnings(res.warnings||[]);setTab("schedule");
+      setSchedule(res.slots);
+      setScheduleWarnings(res.warnings||[]);
+      setTab("schedule");
+      // Auto-save the generated schedule
+      if(tournamentId){
+        const state=currentState();
+        doSave({...state,savedSchedule:res.slots,scheduleWarnings:res.warnings||[]},tournamentId,tournamentName);
+      }
     }catch(err){
       setSchedule([]);setScheduleWarnings([`Scheduler error: ${err.message}`]);setTab("schedule");
     }
-  };
+  },[groups,teams,courts,gameDuration,linkedGroups,courtGroupPrimary,pinnedMatchups,mustPlayMatchups,
+     excludedMatchups,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,
+     tournamentId,tournamentName,currentState,doSave]);
 
   const allTeams=Object.values(teams);
 

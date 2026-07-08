@@ -1164,6 +1164,8 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
   const [createTeamB,setCreateTeamB]=useState("");
   const [dragSuggestion,setDragSuggestion]=useState(null);
   const [printOpen,setPrintOpen]=useState(false);
+  const [rulesOpen,setRulesOpen]=useState(false);
+  const [rulesViolations,setRulesViolations]=useState([]);
 
   const currentState=useCallback(()=>({
     groups,teams,courts,courtGroupPrimary,gameDuration,targetGamesPerTeam,teamGameOverrides,groupBlockRules,teamRestrictions,linkedGroups,
@@ -1424,6 +1426,52 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
       <PrintModal open={printOpen} onClose={()=>setPrintOpen(false)}
         schedule={schedule||[]} groups={groups} teams={teams} courts={courts}
         tournamentName={tournamentName} gameDuration={gameDuration}/>
+
+      {/* Rules Check Modal */}
+      {rulesOpen&&(
+        <>
+          <div onClick={()=>setRulesOpen(false)} style={{position:"fixed",inset:0,background:"#00000077",zIndex:300}}/>
+          <div style={{position:"fixed",top:"10%",left:"50%",transform:"translateX(-50%)",
+            width:"min(520px,95vw)",maxHeight:"80vh",overflowY:"auto",
+            background:P.surface,border:`1px solid ${P.border}`,borderRadius:14,zIndex:301,
+            boxShadow:"0 8px 40px #00000066"}}>
+            <div style={{padding:"18px 22px",borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:20}}>{rulesViolations.length===0?"✅":"⚠️"}</span>
+              <span style={{fontWeight:800,fontSize:16,color:rulesViolations.length===0?P.green:P.accent,flex:1}}>
+                {rulesViolations.length===0?"All Rules Passed!":"Rules Check Results"}
+              </span>
+              <span onClick={()=>setRulesOpen(false)} style={{cursor:"pointer",color:P.muted,fontSize:20}}>✕</span>
+            </div>
+            <div style={{padding:"18px 22px"}}>
+              {rulesViolations.length===0?(
+                <div style={{textAlign:"center",padding:"24px 0"}}>
+                  <div style={{fontSize:48,marginBottom:12}}>🎉</div>
+                  <div style={{color:P.green,fontWeight:700,fontSize:16,marginBottom:8}}>Schedule looks great!</div>
+                  <div style={{color:P.muted,fontSize:13}}>No back-to-backs, no group violations, no duplicate games, no double-booked courts, all teams at target games.</div>
+                </div>
+              ):(
+                <>
+                  <div style={{color:P.muted,fontSize:13,marginBottom:14}}>
+                    Found <strong style={{color:P.red}}>{rulesViolations.length}</strong> issue{rulesViolations.length!==1?"s":""} — fix manually or regenerate.
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {rulesViolations.map((v,i)=>(
+                      <div key={i} style={{background:P.red+"18",border:`1px solid ${P.red}33`,borderRadius:8,
+                        padding:"10px 14px",fontSize:13,color:P.text}}>
+                        {v}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div style={{marginTop:16,display:"flex",gap:10}}>
+                <Btn onClick={()=>setRulesOpen(false)} variant="secondary" style={{flex:1,justifyContent:"center"}}>Close</Btn>
+                {rulesViolations.length>0&&<Btn onClick={()=>{setRulesOpen(false);buildSchedule();}} style={{justifyContent:"center"}}>↺ Regenerate</Btn>}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Header */}
       <div style={{background:P.surface,borderBottom:`1px solid ${P.border}`,padding:"13px 22px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -2291,6 +2339,72 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                   <Btn onClick={buildSchedule} variant="secondary">↺ Regenerate</Btn>
                   <Btn variant="purple" onClick={()=>{setCreateMode(true);setSelectedGame(null);setCreateTeamA("");setCreateTeamB("");}}>✏️ Create Game</Btn>
                   <Btn variant="secondary" onClick={()=>setPrintOpen(true)}>🖨️ Print</Btn>
+                  <Btn variant="secondary" onClick={()=>{
+                    const violations=[];
+                    const allTeamIds=groups.flatMap(g=>g.teams);
+
+                    // 1. Back-to-back check
+                    for(const id of allTeamIds){
+                      const conflict=validateNoBackToBack(schedule,[id],gameDuration);
+                      if(conflict) violations.push(`⚠️ Back-to-back: ${teams[id]?.name} — ${conflict}`);
+                    }
+
+                    // 2. Game count check
+                    for(const id of allTeamIds){
+                      const count=schedule.filter(s=>s.match.home===id||s.match.away===id).length;
+                      const cap=(teamGameOverrides&&teamGameOverrides[id]&&teamGameOverrides[id]>targetGamesPerTeam)?teamGameOverrides[id]:targetGamesPerTeam;
+                      if(count<targetGamesPerTeam) violations.push(`📉 ${teams[id]?.name} has only ${count} game${count!==1?"s":""} (target: ${targetGamesPerTeam})`);
+                      if(count>cap) violations.push(`📈 ${teams[id]?.name} has ${count} games (cap: ${cap})`);
+                    }
+
+                    // 3. Group block rules
+                    for(const s of schedule){
+                      const homeGroup=groups.find(g=>g.teams.includes(s.match.home));
+                      const awayGroup=groups.find(g=>g.teams.includes(s.match.away));
+                      if(homeGroup&&awayGroup&&homeGroup.id!==awayGroup.id){
+                        const blocked=(groupBlockRules[homeGroup.id]||[]);
+                        if(blocked.includes(awayGroup.id)){
+                          violations.push(`🚫 Group block violated: ${teams[s.match.home]?.name} (${homeGroup.name}) vs ${teams[s.match.away]?.name} (${awayGroup.name}) at ${s.timeLabel} ${s.date}`);
+                        }
+                      }
+                    }
+
+                    // 4. Duplicate matchups
+                    const seen=new Set();
+                    for(const s of schedule){
+                      const key=[s.match.home,s.match.away].sort().join("__");
+                      if(seen.has(key)){
+                        violations.push(`🔁 Duplicate game: ${teams[s.match.home]?.name} vs ${teams[s.match.away]?.name}`);
+                      }
+                      seen.add(key);
+                    }
+
+                    // 5. Court double-booking
+                    const courtSlotUsed={};
+                    for(const s of schedule){
+                      const key=`${s.courtId}-${s.date}-${s.absTimeMins}`;
+                      if(courtSlotUsed[key]){
+                        const court=courts.find(c=>c.id===s.courtId);
+                        violations.push(`🏀 Double-booked: ${court?.name} at ${s.timeLabel} ${s.date}`);
+                      }
+                      courtSlotUsed[key]=true;
+                    }
+
+                    // 6. Team restrictions
+                    for(const s of schedule){
+                      for(const teamId of [s.match.home,s.match.away]){
+                        const restrictions=teamRestrictions[teamId]||[];
+                        for(const r of restrictions){
+                          if(r.date===s.date&&s.absTimeMins>=r.startMins&&s.absTimeMins<r.endMins){
+                            violations.push(`🚫 Restriction violated: ${teams[teamId]?.name} plays at ${s.timeLabel} on ${fmtDate(s.date)} (restricted ${fmtTime(r.startMins)}–${fmtTime(r.endMins)})`);
+                          }
+                        }
+                      }
+                    }
+
+                    setRulesViolations(violations);
+                    setRulesOpen(true);
+                  }}>✅ Check Rules</Btn>
                 </div>
               </>
             ))()}

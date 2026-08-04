@@ -467,9 +467,29 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     playedPairs.add(matchKey(home,away));
   };
 
+  // Hard court restriction: if a group is listed in ANY court's primary list,
+  // that group may ONLY play on its primary courts. Groups with no primary
+  // assignment can use any court.
+  const groupHasPrimary = {};
+  for (const g of groups) groupHasPrimary[g.id] = courts.some(c => (courtGroupPrimary[c.id]||[]).includes(g.id));
+  const courtAllowed = (courtId, groupId) => {
+    if (!groupHasPrimary[groupId]) return true;
+    return (courtGroupPrimary[courtId]||[]).includes(groupId);
+  };
+
   const findSlot = (home, away, groupId) => {
-    const sortedCourts = [...courts].sort((a,b)=>
-      ((courtGroupPrimary[a.id]||[]).includes(groupId)?0:1)-((courtGroupPrimary[b.id]||[]).includes(groupId)?0:1));
+    const allowed = courts.filter(c => courtAllowed(c.id, groupId));
+    const sortedCourts = [...allowed].sort((a,b) => {
+      const aIsMine = (courtGroupPrimary[a.id]||[]).includes(groupId);
+      const bIsMine = (courtGroupPrimary[b.id]||[]).includes(groupId);
+      // Prefer courts primary for my group
+      if (aIsMine !== bIsMine) return aIsMine ? -1 : 1;
+      // Deprefer courts primary for some OTHER group (leave them for their owner)
+      const aOther = ((courtGroupPrimary[a.id]||[]).length > 0) && !aIsMine;
+      const bOther = ((courtGroupPrimary[b.id]||[]).length > 0) && !bIsMine;
+      if (aOther !== bOther) return aOther ? 1 : -1;
+      return 0;
+    });
     for(const sk of allSlotKeys)
       for(const court of sortedCourts)
         if(courtSlots[court.id].has(sk)&&!usedCourtSlot[`${court.id}-${sk}`]&&canPlace(sk,home,away))
@@ -667,6 +687,8 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
             slotTeams[G.slotKey]?.add(X);
             slotTeams[G.slotKey]?.add(Y);
             if (!ok) continue;
+            // Court must be allowed for U's group after swap
+            if (!courtAllowed(G.courtId, hgU?.id)) continue;
             // Do the swap
             slotTeams[G.slotKey].delete(X);
             slotTeams[G.slotKey].add(U);
@@ -727,6 +749,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
           });
           for (const opp of opps) {
             if (!courtSlots[courtId]?.has(slotKey) || usedCourtSlot[`${courtId}-${slotKey}`]) continue;
+            if (!courtAllowed(courtId, gidU)) continue;
             if (!canPlace(slotKey, U, opp)) continue;
             const meta = slotMeta[slotKey];
             const newG = {slotKey, dayIdx:meta.dayIdx, date:meta.date, absTimeMins:meta.absTimeMins,
@@ -857,6 +880,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
             if (slotMeta[sk].dayIdx !== td) continue;
             for (const court of courts) {
               if (!courtSlots[court.id].has(sk) || usedCourtSlot[`${court.id}-${sk}`]) continue;
+              if (!courtAllowed(court.id, A.match.groupId)) continue;
               const origA = snapG(A);
               removeG(A);
               if (!canPlace(sk, home, away)) {
@@ -893,8 +917,8 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
 
             const origA = snapG(A), origB = snapG(B);
             removeG(A); removeG(B);
-            const aOk = courtSlots[origB.courtId]?.has(origB.slotKey) && canPlace(origB.slotKey, home, away);
-            const bOk = courtSlots[origA.courtId]?.has(origA.slotKey) && canPlace(origA.slotKey, bh, ba);
+            const aOk = courtSlots[origB.courtId]?.has(origB.slotKey) && courtAllowed(origB.courtId, A.match.groupId) && canPlace(origB.slotKey, home, away);
+            const bOk = courtSlots[origA.courtId]?.has(origA.slotKey) && courtAllowed(origA.courtId, B.match.groupId) && canPlace(origA.slotKey, bh, ba);
             if (aOk && bOk) {
               setSpot(A, origB.slotKey, origB.courtId); insertG(A);
               setSpot(B, origA.slotKey, origA.courtId); insertG(B);

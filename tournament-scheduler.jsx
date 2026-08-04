@@ -428,6 +428,17 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     if(playing.has(home)||playing.has(away)) return false;
     const prev = prevSlot[sk];
     if(prev!==undefined){ const pp=slotTeams[prev]||new Set(); if(pp.has(home)||pp.has(away)) return false; }
+    // Also check the NEXT slot on the same day (main loop places in slot order, so
+    // this is a no-op there; matters for out-of-order placements from rebalance/balance).
+    const meta = slotMeta[sk];
+    if (meta) {
+      const nextKey = sk + gameDurationMins;
+      const nMeta = slotMeta[nextKey];
+      if (nMeta && nMeta.dayIdx === meta.dayIdx) {
+        const nn = slotTeams[nextKey] || new Set();
+        if (nn.has(home) || nn.has(away)) return false;
+      }
+    }
     const linked = [...(linkedMap[home]||[]),...(linkedMap[away]||[])];
     if(linked.some(t=>playing.has(t))) return false;
     // Team time restrictions: can't start a game during a blocked window
@@ -620,6 +631,134 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       }
     }
   }
+
+  // ── Rebalance (post-processing) ─────────────────────────────────────────────
+  // Fix over/under counts. Two strategies, iterated until no progress:
+  //  B: swap an over team OUT of one of its games and put an under team IN (must
+  //     be group-compatible, not-already-played, and free at that slot).
+  //  A: remove an over-vs-over game, then place a new game for an under team at
+  //     the freed slot (may temporarily create a new over, which a follow-up
+  //     Strategy B pass often resolves cleanly).
+  const rebalancePass = () => {
+    const MAX_ITER = 60;
+    for (let iter = 0; iter < MAX_ITER; iter++) {
+      const under = allTeamIds.filter(id => (teamCount[id]||0) < TARGET);
+      const over  = allTeamIds.filter(id => (teamCount[id]||0) > TARGET);
+      if (under.length === 0) return;
+      let progress = false;
+
+      // ── Strategy B: replace an over team X with an under team U in X vs Y ──
+      outerB:
+      for (const X of over) {
+        const games = resultSlots.filter(g => !g.isPinned && (g.match.home===X || g.match.away===X));
+        for (const G of games) {
+          const Y = G.match.home===X ? G.match.away : G.match.home;
+          for (const U of under) {
+            if (U === Y) continue;
+            if (playedPairs.has(matchKey(U, Y))) continue;
+            const hgU = groups.find(g=>g.teams.includes(U));
+            const gY  = groups.find(g=>g.teams.includes(Y));
+            const bgU = (groupBlockRules && hgU)?(groupBlockRules[hgU.id]||[]):[];
+            if (gY && bgU.includes(gY.id)) continue;
+            // canPlace check (temporarily pretend G is gone)
+            slotTeams[G.slotKey]?.delete(X);
+            slotTeams[G.slotKey]?.delete(Y);
+            const ok = canPlace(G.slotKey, U, Y);
+            slotTeams[G.slotKey]?.add(X);
+            slotTeams[G.slotKey]?.add(Y);
+            if (!ok) continue;
+            // Do the swap
+            slotTeams[G.slotKey].delete(X);
+            slotTeams[G.slotKey].add(U);
+            if (G.match.home === X) G.match.home = U; else G.match.away = U;
+            G.match.groupId = hgU?.id || G.match.groupId;
+            G.isPrimary = (courtGroupPrimary[G.courtId]||[]).includes(hgU?.id);
+            teamCount[X]--;
+            teamCount[U] = (teamCount[U]||0) + 1;
+            playedPairs.delete(matchKey(X, Y));
+            playedPairs.add(matchKey(U, Y));
+            progress = true;
+            break outerB;
+          }
+        }
+      }
+      if (progress) continue;
+
+      // ── Strategy A: remove over-vs-over game, insert an under-team game ──
+      const removable = resultSlots.filter(g =>
+        !g.isPinned && !g.isMustPlay &&
+        (teamCount[g.match.home]||0) > TARGET &&
+        (teamCount[g.match.away]||0) > TARGET
+      );
+      outerA:
+      for (const G of removable) {
+        const {slotKey, courtId} = G;
+        const gh = G.match.home, ga = G.match.away;
+        // Remove G
+        delete usedCourtSlot[`${courtId}-${slotKey}`];
+        slotTeams[slotKey]?.delete(gh);
+        slotTeams[slotKey]?.delete(ga);
+        const gi = resultSlots.indexOf(G);
+        if (gi >= 0) resultSlots.splice(gi, 1);
+        teamCount[gh]--;
+        teamCount[ga]--;
+        playedPairs.delete(matchKey(gh, ga));
+
+        let placed = false;
+        for (const U of under) {
+          if ((teamCount[U]||0) >= TARGET) continue;
+          const hgU = groups.find(g=>g.teams.includes(U));
+          const gidU = hgU?.id || groups[0]?.id;
+          const bgU = (groupBlockRules && hgU)?(groupBlockRules[hgU.id]||[]):[];
+          const opps = allTeamIds.filter(o => {
+            if (o===U) return false;
+            if (playedPairs.has(matchKey(U, o))) return false;
+            if (excludedMatchups.has(matchKey(U, o))) return false;
+            const og = groups.find(g=>g.teams.includes(o));
+            if (og && bgU.includes(og.id)) return false;
+            return true;
+          }).sort((a,b)=>{
+            // Prefer opponents currently under; then at-target
+            const ac=(teamCount[a]||0), bc=(teamCount[b]||0);
+            const ap = ac < TARGET ? 0 : (ac === TARGET ? 1 : 2);
+            const bp = bc < TARGET ? 0 : (bc === TARGET ? 1 : 2);
+            if (ap !== bp) return ap - bp;
+            return ac - bc;
+          });
+          for (const opp of opps) {
+            if (!courtSlots[courtId]?.has(slotKey) || usedCourtSlot[`${courtId}-${slotKey}`]) continue;
+            if (!canPlace(slotKey, U, opp)) continue;
+            const meta = slotMeta[slotKey];
+            const newG = {slotKey, dayIdx:meta.dayIdx, date:meta.date, absTimeMins:meta.absTimeMins,
+              timeLabel:meta.timeLabel, courtId,
+              match:{groupId:gidU, home:U, away:opp},
+              isPinned:false, isPrimary:(courtGroupPrimary[courtId]||[]).includes(gidU), isMustPlay:false};
+            resultSlots.push(newG);
+            usedCourtSlot[`${courtId}-${slotKey}`] = true;
+            slotTeams[slotKey] = slotTeams[slotKey] || new Set();
+            slotTeams[slotKey].add(U); slotTeams[slotKey].add(opp);
+            teamCount[U] = (teamCount[U]||0) + 1;
+            teamCount[opp] = (teamCount[opp]||0) + 1;
+            playedPairs.add(matchKey(U, opp));
+            placed = true; progress = true;
+            break;
+          }
+          if (placed) break;
+        }
+        if (placed) break outerA;
+        // Restore G if nothing was placed
+        resultSlots.push(G);
+        usedCourtSlot[`${courtId}-${slotKey}`] = true;
+        slotTeams[slotKey] = slotTeams[slotKey] || new Set();
+        slotTeams[slotKey].add(gh); slotTeams[slotKey].add(ga);
+        teamCount[gh]++; teamCount[ga]++;
+        playedPairs.add(matchKey(gh, ga));
+      }
+
+      if (!progress) break;
+    }
+  };
+  rebalancePass();
 
   // ── Day balance (post-processing) ───────────────────────────────────────────
   // Goal: each team's games are spread as evenly as possible across days

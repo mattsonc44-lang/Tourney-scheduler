@@ -621,6 +621,160 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     }
   }
 
+  // ── Day balance (post-processing) ───────────────────────────────────────────
+  // Goal: each team's games are spread as evenly as possible across days
+  // (e.g. 2 Friday / 2 Saturday when TARGET=4 across 2 days). Only moves
+  // games; never adds/drops. Respects canPlace (back-to-back, restrictions,
+  // linked teams, court double-booking). Pinned games never move; must-play
+  // games can be relocated.
+  const balanceDays = () => {
+    const numDays = sortedDates.length;
+    if (numDays < 2) return;
+
+    const dayCount = {};
+    for (const s of resultSlots) {
+      for (const t of [s.match.home, s.match.away]) {
+        dayCount[t] = dayCount[t] || {};
+        dayCount[t][s.dayIdx] = (dayCount[t][s.dayIdx] || 0) + 1;
+      }
+    }
+
+    const imbalOfCounts = (counts) => {
+      const total = Object.values(counts).reduce((a,b)=>a+b,0);
+      if (total === 0) return 0;
+      const floorI = Math.floor(total/numDays), ceilI = Math.ceil(total/numDays);
+      let bad = 0;
+      for (let d = 0; d < numDays; d++) {
+        const c = counts[d] || 0;
+        if (c > ceilI) bad += c - ceilI;
+        else if (c < floorI) bad += floorI - c;
+      }
+      return bad;
+    };
+    const teamImbal = (t) => imbalOfCounts(dayCount[t] || {});
+    const teamImbalWithChange = (t, changes) => {
+      const counts = {...(dayCount[t] || {})};
+      for (const d in changes) counts[d] = (counts[d] || 0) + changes[d];
+      return imbalOfCounts(counts);
+    };
+    const applyChange = (t, changes) => {
+      dayCount[t] = dayCount[t] || {};
+      for (const d in changes) dayCount[t][d] = (dayCount[t][d] || 0) + changes[d];
+    };
+
+    const removeG = (g) => {
+      delete usedCourtSlot[`${g.courtId}-${g.slotKey}`];
+      slotTeams[g.slotKey]?.delete(g.match.home);
+      slotTeams[g.slotKey]?.delete(g.match.away);
+      const i = resultSlots.indexOf(g);
+      if (i >= 0) resultSlots.splice(i, 1);
+    };
+    const insertG = (g) => {
+      usedCourtSlot[`${g.courtId}-${g.slotKey}`] = true;
+      slotTeams[g.slotKey] = slotTeams[g.slotKey] || new Set();
+      slotTeams[g.slotKey].add(g.match.home);
+      slotTeams[g.slotKey].add(g.match.away);
+      resultSlots.push(g);
+    };
+    const setSpot = (g, sk, courtId) => {
+      g.slotKey = sk; g.courtId = courtId; g.dayIdx = slotMeta[sk].dayIdx;
+      g.date = slotMeta[sk].date; g.absTimeMins = slotMeta[sk].absTimeMins;
+      g.timeLabel = slotMeta[sk].timeLabel;
+      g.isPrimary = (courtGroupPrimary[courtId]||[]).includes(g.match.groupId);
+    };
+    const snapG = (g) => ({ slotKey:g.slotKey, courtId:g.courtId, dayIdx:g.dayIdx,
+      date:g.date, absTimeMins:g.absTimeMins, timeLabel:g.timeLabel, isPrimary:g.isPrimary });
+
+    const movable = (g) => !g.isPinned;
+
+    const MAX_PASSES = 40;
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      let improved = false;
+
+      for (const A of [...resultSlots]) {
+        if (!movable(A)) continue;
+        const {home, away} = A.match;
+        const fromDay = A.dayIdx;
+
+        const homeCnt = dayCount[home]?.[fromDay] || 0;
+        const awayCnt = dayCount[away]?.[fromDay] || 0;
+        const homeTot = Object.values(dayCount[home]||{}).reduce((a,b)=>a+b,0);
+        const awayTot = Object.values(dayCount[away]||{}).reduce((a,b)=>a+b,0);
+        const homeCeil = Math.ceil(homeTot/numDays);
+        const awayCeil = Math.ceil(awayTot/numDays);
+        if (homeCnt <= homeCeil && awayCnt <= awayCeil) continue;
+
+        let done = false;
+
+        // Direct move to empty spot on another day
+        for (let td = 0; td < numDays && !done; td++) {
+          if (td === fromDay) continue;
+          const predicted = teamImbalWithChange(home, {[fromDay]:-1, [td]:+1})
+                          + teamImbalWithChange(away, {[fromDay]:-1, [td]:+1});
+          const current = teamImbal(home) + teamImbal(away);
+          if (predicted >= current) continue;
+
+          for (const sk of allSlotKeys) {
+            if (slotMeta[sk].dayIdx !== td) continue;
+            for (const court of courts) {
+              if (!courtSlots[court.id].has(sk) || usedCourtSlot[`${court.id}-${sk}`]) continue;
+              const origA = snapG(A);
+              removeG(A);
+              if (!canPlace(sk, home, away)) {
+                Object.assign(A, origA); insertG(A); continue;
+              }
+              setSpot(A, sk, court.id); insertG(A);
+              applyChange(home, {[fromDay]:-1, [td]:+1});
+              applyChange(away, {[fromDay]:-1, [td]:+1});
+              done = true; improved = true; break;
+            }
+            if (done) break;
+          }
+        }
+        if (done) continue;
+
+        // Swap with a game on another day
+        for (let td = 0; td < numDays && !done; td++) {
+          if (td === fromDay) continue;
+          const swapCands = resultSlots.filter(g => g !== A && g.dayIdx === td && movable(g));
+          for (const B of swapCands) {
+            const {home:bh, away:ba} = B.match;
+            if (home===bh||home===ba||away===bh||away===ba) continue;
+
+            const changes = {
+              [home]:{[fromDay]:-1,[td]:+1}, [away]:{[fromDay]:-1,[td]:+1},
+              [bh]:  {[td]:-1,[fromDay]:+1}, [ba]:  {[td]:-1,[fromDay]:+1},
+            };
+            let oldSum = 0, newSum = 0;
+            for (const t of [home, away, bh, ba]) {
+              oldSum += teamImbal(t);
+              newSum += teamImbalWithChange(t, changes[t]);
+            }
+            if (newSum >= oldSum) continue;
+
+            const origA = snapG(A), origB = snapG(B);
+            removeG(A); removeG(B);
+            const aOk = courtSlots[origB.courtId]?.has(origB.slotKey) && canPlace(origB.slotKey, home, away);
+            const bOk = courtSlots[origA.courtId]?.has(origA.slotKey) && canPlace(origA.slotKey, bh, ba);
+            if (aOk && bOk) {
+              setSpot(A, origB.slotKey, origB.courtId); insertG(A);
+              setSpot(B, origA.slotKey, origA.courtId); insertG(B);
+              applyChange(home, changes[home]); applyChange(away, changes[away]);
+              applyChange(bh,   changes[bh]);   applyChange(ba,   changes[ba]);
+              done = true; improved = true; break;
+            } else {
+              Object.assign(A, origA); Object.assign(B, origB);
+              insertG(A); insertG(B);
+            }
+          }
+        }
+      }
+
+      if (!improved) break;
+    }
+  };
+  balanceDays();
+
   // ── Report ──────────────────────────────────────────────────────────────────
   const under = allTeamIds.filter(id=>(teamCount[id]||0)<TARGET);
   const over  = allTeamIds.filter(id=>(teamCount[id]||0)>TARGET);

@@ -16,6 +16,27 @@ const TEAM_COLORS = [
 ];
 const GAME_DURATIONS = [30,35,40,45,50,55,60];
 
+// Divisions: preset colors + hash-based fallback for custom division names.
+const DIVISION_PRESETS = ["Men's","Women's","Boys","Girls","Varsity","JV","Open"];
+const DIVISION_COLORS_PRESET = {
+  "Men's":   "#3498db",  // blue
+  "Women's": "#e91e63",  // pink
+  "Boys":    "#00bcd4",
+  "Girls":   "#ff9800",
+  "Varsity": "#9b59b6",
+  "JV":      "#8bc34a",
+  "Open":    "#f5a623",
+};
+const DIVISION_COLORS_FALLBACK = ["#1abc9c","#673ab7","#e74c3c","#607d8b","#4caf50","#e67e22"];
+const divisionColor = (division) => {
+  if (!division) return null;
+  if (DIVISION_COLORS_PRESET[division]) return DIVISION_COLORS_PRESET[division];
+  // Hash the division name to pick a stable fallback color
+  let h = 0;
+  for (let i = 0; i < division.length; i++) h = (h*31 + division.charCodeAt(i)) & 0xffff;
+  return DIVISION_COLORS_FALLBACK[h % DIVISION_COLORS_FALLBACK.length];
+};
+
 const uid = () => Math.random().toString(36).slice(2,8);
 const timeMins = t => { const [h,m]=t.split(":").map(Number); return h*60+m; };
 const fmtTime = m => {
@@ -468,8 +489,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   };
 
   // Hard court restriction: if a group is listed in ANY court's primary list,
-  // that group may ONLY play on its primary courts. Groups with no primary
-  // assignment can use any court.
+  // that group may ONLY play on its primary courts.
   const groupHasPrimary = {};
   for (const g of groups) groupHasPrimary[g.id] = courts.some(c => (courtGroupPrimary[c.id]||[]).includes(g.id));
   const courtAllowed = (courtId, groupId) => {
@@ -482,9 +502,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     const sortedCourts = [...allowed].sort((a,b) => {
       const aIsMine = (courtGroupPrimary[a.id]||[]).includes(groupId);
       const bIsMine = (courtGroupPrimary[b.id]||[]).includes(groupId);
-      // Prefer courts primary for my group
       if (aIsMine !== bIsMine) return aIsMine ? -1 : 1;
-      // Deprefer courts primary for some OTHER group (leave them for their owner)
       const aOther = ((courtGroupPrimary[a.id]||[]).length > 0) && !aIsMine;
       const bOther = ((courtGroupPrimary[b.id]||[]).length > 0) && !bIsMine;
       if (aOther !== bOther) return aOther ? 1 : -1;
@@ -653,12 +671,9 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
   }
 
   // ── Rebalance (post-processing) ─────────────────────────────────────────────
-  // Fix over/under counts. Two strategies, iterated until no progress:
-  //  B: swap an over team OUT of one of its games and put an under team IN (must
-  //     be group-compatible, not-already-played, and free at that slot).
-  //  A: remove an over-vs-over game, then place a new game for an under team at
-  //     the freed slot (may temporarily create a new over, which a follow-up
-  //     Strategy B pass often resolves cleanly).
+  // Fix over/under counts.
+  //  B: swap an over team OUT of one of its games and put an under team IN
+  //  A: remove an over-vs-over game, then place a new under-team game
   const rebalancePass = () => {
     const MAX_ITER = 60;
     for (let iter = 0; iter < MAX_ITER; iter++) {
@@ -667,7 +682,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       if (under.length === 0) return;
       let progress = false;
 
-      // ── Strategy B: replace an over team X with an under team U in X vs Y ──
       outerB:
       for (const X of over) {
         const games = resultSlots.filter(g => !g.isPinned && (g.match.home===X || g.match.away===X));
@@ -680,16 +694,13 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
             const gY  = groups.find(g=>g.teams.includes(Y));
             const bgU = (groupBlockRules && hgU)?(groupBlockRules[hgU.id]||[]):[];
             if (gY && bgU.includes(gY.id)) continue;
-            // canPlace check (temporarily pretend G is gone)
             slotTeams[G.slotKey]?.delete(X);
             slotTeams[G.slotKey]?.delete(Y);
             const ok = canPlace(G.slotKey, U, Y);
             slotTeams[G.slotKey]?.add(X);
             slotTeams[G.slotKey]?.add(Y);
             if (!ok) continue;
-            // Court must be allowed for U's group after swap
             if (!courtAllowed(G.courtId, hgU?.id)) continue;
-            // Do the swap
             slotTeams[G.slotKey].delete(X);
             slotTeams[G.slotKey].add(U);
             if (G.match.home === X) G.match.home = U; else G.match.away = U;
@@ -706,7 +717,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       }
       if (progress) continue;
 
-      // ── Strategy A: remove over-vs-over game, insert an under-team game ──
       const removable = resultSlots.filter(g =>
         !g.isPinned && !g.isMustPlay &&
         (teamCount[g.match.home]||0) > TARGET &&
@@ -716,7 +726,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
       for (const G of removable) {
         const {slotKey, courtId} = G;
         const gh = G.match.home, ga = G.match.away;
-        // Remove G
         delete usedCourtSlot[`${courtId}-${slotKey}`];
         slotTeams[slotKey]?.delete(gh);
         slotTeams[slotKey]?.delete(ga);
@@ -740,7 +749,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
             if (og && bgU.includes(og.id)) return false;
             return true;
           }).sort((a,b)=>{
-            // Prefer opponents currently under; then at-target
             const ac=(teamCount[a]||0), bc=(teamCount[b]||0);
             const ap = ac < TARGET ? 0 : (ac === TARGET ? 1 : 2);
             const bp = bc < TARGET ? 0 : (bc === TARGET ? 1 : 2);
@@ -769,7 +777,6 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
           if (placed) break;
         }
         if (placed) break outerA;
-        // Restore G if nothing was placed
         resultSlots.push(G);
         usedCourtSlot[`${courtId}-${slotKey}`] = true;
         slotTeams[slotKey] = slotTeams[slotKey] || new Set();
@@ -793,6 +800,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
     const numDays = sortedDates.length;
     if (numDays < 2) return;
 
+    // Initial per-team, per-day counts
     const dayCount = {};
     for (const s of resultSlots) {
       for (const t of [s.match.home, s.match.away]) {
@@ -858,6 +866,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
         const {home, away} = A.match;
         const fromDay = A.dayIdx;
 
+        // Skip if this game isn't contributing to over-day for either team
         const homeCnt = dayCount[home]?.[fromDay] || 0;
         const awayCnt = dayCount[away]?.[fromDay] || 0;
         const homeTot = Object.values(dayCount[home]||{}).reduce((a,b)=>a+b,0);
@@ -868,7 +877,7 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
 
         let done = false;
 
-        // Direct move to empty spot on another day
+        // ── Try direct move to an empty spot on another day ──
         for (let td = 0; td < numDays && !done; td++) {
           if (td === fromDay) continue;
           const predicted = teamImbalWithChange(home, {[fromDay]:-1, [td]:+1})
@@ -896,14 +905,16 @@ function generateSchedule({groups,teams,courts,gameDurationMins,linkedGroups,cou
         }
         if (done) continue;
 
-        // Swap with a game on another day
+        // ── Try swap with a game on another day ──
         for (let td = 0; td < numDays && !done; td++) {
           if (td === fromDay) continue;
           const swapCands = resultSlots.filter(g => g !== A && g.dayIdx === td && movable(g));
           for (const B of swapCands) {
             const {home:bh, away:ba} = B.match;
+            // Skip if any team overlaps (would fail canPlace anyway)
             if (home===bh||home===ba||away===bh||away===ba) continue;
 
+            // Predict delta over all 4 affected teams
             const changes = {
               [home]:{[fromDay]:-1,[td]:+1}, [away]:{[fromDay]:-1,[td]:+1},
               [bh]:  {[td]:-1,[fromDay]:+1}, [ba]:  {[td]:-1,[fromDay]:+1},
@@ -1610,6 +1621,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
     purgeGroup(id);
   };
   const updateGroupName=(id,name)=>setGroups(g=>g.map(x=>x.id===id?{...x,name}:x));
+  const updateGroupDivision=(id,division)=>setGroups(g=>g.map(x=>x.id===id?{...x,division}:x));
   const addTeam=gid=>{const name=(newTeamName[gid]||"").trim();if(!name)return;const id="t"+uid();const ci=Object.keys(teams).length%TEAM_COLORS.length;setTeams(t=>({...t,[id]:{id,name,color:TEAM_COLORS[ci]}}));setGroups(g=>g.map(x=>x.id===gid?{...x,teams:[...x.teams,id]}:x));setNewTeamName(n=>({...n,[gid]:""}));};
   const removeTeam=(gid,tid)=>{
     setGroups(g=>g.map(x=>x.id===gid?{...x,teams:x.teams.filter(t=>t!==tid)}:x));
@@ -1853,10 +1865,28 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                 const nExcluded=statuses.filter(s=>s==="excluded").length;
                 const nFree=statuses.filter(s=>s==="free").length;
                 return (
-                  <Card key={group.id}>
-                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                  <Card key={group.id} style={divisionColor(group.division)?{borderLeft:`4px solid ${divisionColor(group.division)}`}:undefined}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+                      {divisionColor(group.division)&&(
+                        <span style={{background:divisionColor(group.division)+"22",color:divisionColor(group.division),
+                          border:`1px solid ${divisionColor(group.division)}55`,borderRadius:6,padding:"2px 8px",
+                          fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:0.4}}>
+                          {group.division}
+                        </span>
+                      )}
                       <input value={group.name} onChange={e=>updateGroupName(group.id,e.target.value)}
-                        style={{background:"transparent",border:"none",color:P.accent,fontWeight:700,fontSize:15,fontFamily:"inherit",outline:"none",flex:1}}/>
+                        style={{background:"transparent",border:"none",color:P.accent,fontWeight:700,fontSize:15,fontFamily:"inherit",outline:"none",flex:1,minWidth:120}}/>
+                      <select value={DIVISION_PRESETS.includes(group.division)?group.division:(group.division?"__custom":"")}
+                        onChange={e=>{
+                          const v=e.target.value;
+                          if(v==="__custom"){const c=prompt("Division name:",group.division&&!DIVISION_PRESETS.includes(group.division)?group.division:"");if(c!==null)updateGroupDivision(group.id,c.trim());}
+                          else updateGroupDivision(group.id,v);
+                        }}
+                        style={{background:P.surfaceLight,color:P.text,border:`1px solid ${P.border}`,borderRadius:6,padding:"5px 8px",fontSize:12,fontFamily:"inherit"}}>
+                        <option value="">— no division —</option>
+                        {DIVISION_PRESETS.map(d=><option key={d} value={d}>{d}</option>)}
+                        <option value="__custom">{group.division&&!DIVISION_PRESETS.includes(group.division)?`Custom: ${group.division}`:"Custom…"}</option>
+                      </select>
                       <span style={{color:P.muted,fontSize:12}}>{group.teams.length} teams</span>
                       <Btn variant="danger" small onClick={()=>removeGroup(group.id)}>Remove</Btn>
                     </div>
@@ -2461,6 +2491,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                   const home=game?teams[game.match.home]:null;
                                   const away=game?teams[game.match.away]:null;
                                   const grp=game?groups.find(g=>g.id===game.match.groupId):null;
+                                  const divColor=grp?divisionColor(grp.division):null;
                                   const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=slotTime&&slotTime<=timeMins(w.close));
                                   const closed=!courtOpen&&!game?.isPinned;
                                   const gameIdx=game?schedule.indexOf(game):-1;
@@ -2583,8 +2614,9 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                       }:undefined}
                                       onDragEnd={()=>setDragOver(null)}
                                       style={{
-                                        background:dragOver===`${slotTime}-${court.id}`?P.accent+"22":isSelected?P.accent+"33":createMode&&createTeamA&&createTeamB&&!closed?P.purple+"15":isTarget&&game?P.purple+"22":isTarget?P.accent+"12":closed?"#0a1520":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
+                                        background:dragOver===`${slotTime}-${court.id}`?P.accent+"22":isSelected?P.accent+"33":createMode&&createTeamA&&createTeamB&&!closed?P.purple+"15":isTarget&&game?P.purple+"22":isTarget?P.accent+"12":closed?"#0a1520":divColor?divColor+"12":game?.isPinned?P.blue+"18":game?P.surface:P.bg,
                                         borderLeft:ci>0?`1px solid ${P.border}`:"none",
+                                        borderTop:divColor?`3px solid ${divColor}`:"none",
                                         padding:"8px 11px",minHeight:60,display:"flex",flexDirection:"column",justifyContent:"center",
                                         opacity:closed?0.45:1,
                                         cursor:closed?"default":game?"grab":"default",
@@ -2600,6 +2632,7 @@ function AppInner({ user, onSignOut, shareOpen, setShareOpen }) {
                                             <span style={{color:away.color,fontWeight:700,fontSize:13}}>{away.name}</span>
                                           </div>
                                           <div style={{display:"flex",gap:4,marginTop:3,flexWrap:"wrap"}}>
+                                            {grp?.division&&divColor&&<span style={{fontSize:10,color:divColor,background:divColor+"22",borderRadius:4,padding:"1px 5px",border:`1px solid ${divColor}55`,fontWeight:700}}>{grp.division}</span>}
                                             {grp&&<span style={{fontSize:10,color:P.muted,background:P.bg,borderRadius:4,padding:"1px 5px",border:`1px solid ${P.border}`}}>{grp.name}</span>}
                                             {game.isPinned&&<span style={{fontSize:10,color:P.blue,background:P.blue+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.blue}44`}}>📌 pinned</span>}
                                             {game.isMustPlay&&!game.isPinned&&<span style={{fontSize:10,color:P.purple,background:P.purple+"18",borderRadius:4,padding:"1px 5px",border:`1px solid ${P.purple}44`}}>🎯 must play</span>}

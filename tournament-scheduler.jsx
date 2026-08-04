@@ -1150,6 +1150,27 @@ function PrintModal({open, onClose, schedule, groups, teams, courts, tournamentN
     const fmtTime=m=>{const h=Math.floor(m/60)%24,mn=m%60;return`${h%12||12}:${String(mn).padStart(2,"0")} ${h<12?"AM":"PM"}`;};
     const fmtDate=d=>{const [y,mo,day]=d.split("-");const months=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];return`${months[parseInt(mo)-1]} ${parseInt(day)}, ${y}`;};
 
+    // Division helpers (mirror the main app's palette)
+    const DIV_PRESET={"Men's":"#3498db","Women's":"#e91e63","Boys":"#00bcd4","Girls":"#ff9800","Varsity":"#9b59b6","JV":"#8bc34a","Open":"#f5a623"};
+    const DIV_FALLBACK=["#1abc9c","#673ab7","#e74c3c","#607d8b","#4caf50","#e67e22"];
+    const divColor=div=>{
+      if(!div) return null;
+      if(DIV_PRESET[div]) return DIV_PRESET[div];
+      let h=0; for(let i=0;i<div.length;i++)h=(h*31+div.charCodeAt(i))&0xffff;
+      return DIV_FALLBACK[h%DIV_FALLBACK.length];
+    };
+    const gameDiv=game=>{
+      const g=groups.find(gr=>gr.id===game.match.groupId);
+      return {division:g?.division||"", color:divColor(g?.division)};
+    };
+    const teamDiv=teamId=>{
+      const g=groups.find(gr=>gr.teams.includes(teamId));
+      return {division:g?.division||"", color:divColor(g?.division)};
+    };
+    const divTag=(division,color)=>division&&color
+      ?`<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:bold;letter-spacing:0.3px;text-transform:uppercase;background:${color}22;color:${color};border:1px solid ${color}66;">${division}</span>`
+      :"";
+
     let html=`<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>${tournamentName||"Tournament Schedule"}</title>
 <style>
@@ -1213,7 +1234,9 @@ function PrintModal({open, onClose, schedule, groups, teams, courts, tournamentN
             const courtOpen=(court.windows||[]).some(w=>w.date===date&&timeMins(w.open)<=t&&t<=timeMins(w.close));
             if(game){
               const home=teams[game.match.home],away=teams[game.match.away];
-              html+=`<td class="game-cell"><span class="team-a">${home?.name||"?"}</span><br><span style="color:#888;font-size:9px;">vs</span><br><span class="team-b">${away?.name||"?"}</span></td>`;
+              const d=gameDiv(game);
+              const cellStyle=d.color?`border-left:3px solid ${d.color};background:${d.color}12;`:"";
+              html+=`<td class="game-cell" style="${cellStyle}">${d.division?divTag(d.division,d.color)+"<br>":""}<span class="team-a">${home?.name||"?"}</span><br><span style="color:#888;font-size:9px;">vs</span><br><span class="team-b">${away?.name||"?"}</span></td>`;
             } else if(!courtOpen){
               html+=`<td><span class="closed">— closed —</span></td>`;
             } else {
@@ -1235,10 +1258,13 @@ function PrintModal({open, onClose, schedule, groups, teams, courts, tournamentN
         const venueCourts=courts.filter(c=>(c.location||c.name)===venue);
         const venueGames=(schedule||[]).filter(s=>venueCourts.some(c=>c.id===s.courtId));
         if(!venueGames.length) continue;
-        html+=`<h3>${venue}</h3><table class="grid-table"><thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Home</th><th>Away</th></tr></thead><tbody>`;
+        html+=`<h3>${venue}</h3><table class="grid-table"><thead><tr><th>Division</th><th>Date</th><th>Time</th><th>Court</th><th>Home</th><th>Away</th></tr></thead><tbody>`;
         [...venueGames].sort((a,b)=>a.slotKey-b.slotKey).forEach(s=>{
           const court=courts.find(c=>c.id===s.courtId);
-          html+=`<tr><td>${fmtDate(s.date)}</td><td>${s.timeLabel}</td><td>${court?.name||""}</td><td class="team-a">${teams[s.match.home]?.name||""}</td><td>${teams[s.match.away]?.name||""}</td></tr>`;
+          const d=gameDiv(s);
+          const rowStyle=d.color?`background:${d.color}0F;`:"";
+          const firstCell=d.color?`style="border-left:4px solid ${d.color};"`:"";
+          html+=`<tr style="${rowStyle}"><td ${firstCell}>${divTag(d.division,d.color)}</td><td>${fmtDate(s.date)}</td><td>${s.timeLabel}</td><td>${court?.name||""}</td><td class="team-a">${teams[s.match.home]?.name||""}</td><td>${teams[s.match.away]?.name||""}</td></tr>`;
         });
         html+=`</tbody></table>`;
       }
@@ -1251,9 +1277,12 @@ function PrintModal({open, onClose, schedule, groups, teams, courts, tournamentN
       for(const court of courts){
         const courtGames=(schedule||[]).filter(s=>s.courtId===court.id);
         if(!courtGames.length) continue;
-        html+=`<h3>${court.name}${court.location?" · "+court.location:""}</h3><table class="grid-table"><thead><tr><th>Date</th><th>Time</th><th>Home</th><th>Away</th></tr></thead><tbody>`;
+        html+=`<h3>${court.name}${court.location?" · "+court.location:""}</h3><table class="grid-table"><thead><tr><th>Division</th><th>Date</th><th>Time</th><th>Home</th><th>Away</th></tr></thead><tbody>`;
         [...courtGames].sort((a,b)=>a.slotKey-b.slotKey).forEach(s=>{
-          html+=`<tr><td>${fmtDate(s.date)}</td><td>${s.timeLabel}</td><td class="team-a">${teams[s.match.home]?.name||""}</td><td>${teams[s.match.away]?.name||""}</td></tr>`;
+          const d=gameDiv(s);
+          const rowStyle=d.color?`background:${d.color}0F;`:"";
+          const firstCell=d.color?`style="border-left:4px solid ${d.color};"`:"";
+          html+=`<tr style="${rowStyle}"><td ${firstCell}>${divTag(d.division,d.color)}</td><td>${fmtDate(s.date)}</td><td>${s.timeLabel}</td><td class="team-a">${teams[s.match.home]?.name||""}</td><td>${teams[s.match.away]?.name||""}</td></tr>`;
         });
         html+=`</tbody></table>`;
       }
@@ -1263,19 +1292,39 @@ function PrintModal({open, onClose, schedule, groups, teams, courts, tournamentN
     // ── Team Schedules ──
     const teamsToPrint=printAllTeams ? allTeams : allTeams.filter(t=>selectedTeams.has(t.id));
     if(teamsToPrint.length>0){
-      html+=`<div class="section"><h2>👥 Team Schedules</h2><div class="teams-grid">`;
+      // Group teams by division for a cleaner report
+      const byDiv={};
       for(const team of teamsToPrint){
-        const tGames=(schedule||[]).filter(s=>s.match.home===team.id||s.match.away===team.id).sort((a,b)=>a.slotKey-b.slotKey);
-        html+=`<div class="team-card"><div class="team-name">${team.name} <span style="font-weight:normal;font-size:10px;color:#666;">${tGames.length} game${tGames.length!==1?"s":""}</span></div>`;
-        for(const s of tGames){
-          const opp=s.match.home===team.id?teams[s.match.away]:teams[s.match.home];
-          const crt=courts.find(c=>c.id===s.courtId);
-          html+=`<div class="game-row"><span class="game-date">${fmtDate(s.date)}</span><span class="game-time">${s.timeLabel}</span><span class="game-opp">vs ${opp?.name||"?"}</span><span class="game-court">${crt?.name||""}</span></div>`;
+        const td=teamDiv(team.id);
+        const key=td.division||"—";
+        (byDiv[key]=byDiv[key]||[]).push(team);
+      }
+      const divOrder=Object.keys(byDiv).sort((a,b)=>{
+        // put actual divisions first, "—" last
+        if(a==="—")return 1; if(b==="—")return -1; return a.localeCompare(b);
+      });
+      html+=`<div class="section"><h2>👥 Team Schedules</h2>`;
+      for(const dKey of divOrder){
+        const dColor=dKey!=="—"?divColor(dKey):null;
+        if(divOrder.length>1||dKey!=="—")
+          html+=`<h3 style="${dColor?`border-left:4px solid ${dColor};padding-left:8px;color:${dColor};`:""}">${dKey==="—"?"No division":dKey} <span style="font-weight:normal;font-size:10px;color:#666;">(${byDiv[dKey].length} team${byDiv[dKey].length!==1?"s":""})</span></h3>`;
+        html+=`<div class="teams-grid">`;
+        for(const team of byDiv[dKey]){
+          const td=teamDiv(team.id);
+          const tGames=(schedule||[]).filter(s=>s.match.home===team.id||s.match.away===team.id).sort((a,b)=>a.slotKey-b.slotKey);
+          const cardStyle=td.color?`border-left:4px solid ${td.color};`:"";
+          html+=`<div class="team-card" style="${cardStyle}"><div class="team-name">${team.name} ${divTag(td.division,td.color)} <span style="font-weight:normal;font-size:10px;color:#666;">${tGames.length} game${tGames.length!==1?"s":""}</span></div>`;
+          for(const s of tGames){
+            const opp=s.match.home===team.id?teams[s.match.away]:teams[s.match.home];
+            const crt=courts.find(c=>c.id===s.courtId);
+            html+=`<div class="game-row"><span class="game-date">${fmtDate(s.date)}</span><span class="game-time">${s.timeLabel}</span><span class="game-opp">vs ${opp?.name||"?"}</span><span class="game-court">${crt?.name||""}</span></div>`;
+          }
+          if(!tGames.length) html+=`<div style="color:#aaa;font-style:italic;font-size:10px;">No games scheduled</div>`;
+          html+=`</div>`;
         }
-        if(!tGames.length) html+=`<div style="color:#aaa;font-style:italic;font-size:10px;">No games scheduled</div>`;
         html+=`</div>`;
       }
-      html+=`</div></div>`;
+      html+=`</div>`;
     }
 
     html+=`</body></html>`;
